@@ -1,0 +1,11 @@
+.idea
+node_modules
+.yarn
+cookies.json
+extensions
+playwright-cache
+dist
+output
+TODO
+custom-cache
+flags.json
