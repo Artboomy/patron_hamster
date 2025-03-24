@@ -106,7 +106,10 @@ export class FanboxExtractor extends Extractor {
           timestamp,
           tags,
           img
-        )
+        ).catch((e) => {
+          spinner.fail(`Failed to save ${url}: ${String(e)}`)
+          throw e
+        })
         spinner.succeed(`Saved ${url} to ${imageIdToName[imageId]}`)
       } else {
         spinner.succeed(

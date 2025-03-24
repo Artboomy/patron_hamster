@@ -31,6 +31,7 @@ export class Extractor {
   context: BrowserContext
   page: Page
   sourceUrl: string = ''
+  pageUrl: string = ''
   visited: Set<string>
   years: string[]
   turndownService: TurndownService
@@ -177,6 +178,7 @@ export class Extractor {
     }
     const year = rawYear === 'undefined' ? '' : rawYear
     this.sourceUrl = sourceUrl.split('?')[0]
+    this.pageUrl = sourceUrl
     this.beforeExtractCheck(sourceUrl, year)
     if (this.sourceUrl.endsWith('/posts')) {
       if (year) {
@@ -666,14 +668,13 @@ ${content}
       }),
       'Waiting for loader to hide'
     )
-    console.log(
-      'Loaded next page at',
-      await page.evaluate(
-        () =>
-          // @ts-ignore page ctx
-          location.href
-      )
+    const currentPage = await page.evaluate(
+      () =>
+        // @ts-ignore page ctx
+        location.href
     )
+    this.pageUrl = currentPage
+    console.log('Loaded next page at', currentPage)
     return true
   }
 }

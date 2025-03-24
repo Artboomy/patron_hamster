@@ -25,8 +25,7 @@ function getCacheKey(url: string): string {
   // Combine them
   const strippedUrl = origin + pathname
   // Hash to avoid illegal filename characters
-  const hash = crypto.createHash('sha256').update(strippedUrl).digest('hex')
-  return hash
+  return crypto.createHash('sha256').update(strippedUrl).digest('hex')
 }
 
 // Optional: guess file extension from the pathname
@@ -222,7 +221,7 @@ export async function runCache(
     total: 0,
     hit: 0
   }
-  setInterval(() => {
+  const reporter = setInterval(() => {
     console.log(
       `\nCache hit rate ${count.hit}/${count.total}, ${((count.hit * 100) / count.total).toFixed(2)}%`
     )
@@ -369,4 +368,5 @@ export async function runCache(
       }
     }
   )
+  return reporter
 }

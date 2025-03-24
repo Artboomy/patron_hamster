@@ -5,6 +5,7 @@ import path from 'path'
 import { exiftool } from 'exiftool-vendored'
 import { Page } from 'rebrowser-playwright'
 import { imageExtensions } from '../constants.js'
+import { waitForDelay } from '../utils.js'
 
 const hasExtension = (str: string): boolean => {
   const parts = str.split('.')
@@ -45,18 +46,39 @@ export async function downloadFile(
   return fileName
 }
 
-export async function linkToBuffer(page: Page, fileUrl: string) {
-  // console.log(`Getting buffer from link ${fileUrl}`)
-  return Buffer.from(
-    await page.evaluate(async (url) => {
-      //@ts-ignore page ctx
-      const response = await fetch(url, { credentials: 'include' }) // Reuses cookies
-      if (!response.ok)
-        throw new Error(`🚨 Failed to fetch file: ${response.statusText}`)
-      const blob = await response.blob()
-      return Array.from(new Uint8Array(await blob.arrayBuffer())) // Convert to buffer
-    }, fileUrl)
-  )
+export async function linkToBuffer(
+  page: Page,
+  fileUrl: string,
+  maxRetries = 5
+): Promise<Buffer> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const array = await page.evaluate(async (url) => {
+        // @ts-ignore page context
+        const response = await fetch(url, { credentials: 'include' })
+        if (!response.ok) {
+          throw new Error(
+            `🚨 Failed to fetch file: ${response.status} ${response.statusText}`
+          )
+        }
+        const blob = await response.blob()
+        return Array.from(new Uint8Array(await blob.arrayBuffer()))
+      }, fileUrl)
+
+      return Buffer.from(array) // Success
+    } catch (err) {
+      if (attempt < maxRetries) {
+        const delay = 500 + Math.floor(Math.random() * 200) // 500–700ms
+        console.warn(`⚠️ Attempt ${attempt} failed. Retrying in ${delay}ms...`)
+        await waitForDelay(delay)
+      } else {
+        console.error(`❌ All ${maxRetries} attempts failed for ${fileUrl}`)
+        throw err // Re-throw the final error
+      }
+    }
+  }
+
+  throw new Error('Unexpected retry exit') // Just in case
 }
 
 export async function saveBufferToDisk({

@@ -12,6 +12,7 @@ import { oraPromise } from 'ora'
 const cacheDir = path.resolve('./playwright-cache')
 
 import { exec } from 'child_process'
+import { clearInterval } from 'node:timers'
 function readCookies(): Cookie[] {
   try {
     return JSON.parse(fs.readFileSync(fileName, 'utf8'))
@@ -46,7 +47,8 @@ function prepareDir(dirName: string) {
 }
 
 let isFinished = false
-
+let cacheId: NodeJS.Timeout | null = null
+let pageUrl: string = ''
 export async function main() {
   const args = minimist(process.argv.slice(2))
   const { server, username, password, dir, url, year } = args
@@ -103,7 +105,7 @@ export async function main() {
     console.warn('Unrecognized site')
     process.exit(0)
   }
-  await runCache(context, site)
+  cacheId = await runCache(context, site)
   context.setDefaultTimeout(50_000)
 
   const page = await context.newPage()
@@ -121,9 +123,13 @@ export async function main() {
   await saveCookies(context)
 
   try {
-    const finalDir = await extractor.extract(url, String(year))
+    if (pageUrl) {
+      console.log(`⏯  Continuing from ${pageUrl}`)
+    }
+    const finalDir = await extractor.extract(pageUrl || url, String(year))
     await oraPromise(runTocHtml(finalDir), 'Generating html gallery...')
   } catch (e) {
+    pageUrl = extractor.pageUrl
     await context.close()
     throw e
   }
@@ -142,11 +148,14 @@ if (args.recover) {
   while (repeats > 0) {
     try {
       await main()
-    } catch (_e) {
+    } catch (e) {
+      if (cacheId) {
+        clearInterval(cacheId)
+      }
       if (isFinished) {
         process.exit()
       }
-      console.log('🔃  Failure, restarting')
+      console.log('🔃  Failure, restarting', e)
       repeats -= 1
       await waitForDelay(1000)
     }
