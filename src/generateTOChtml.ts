@@ -87,7 +87,7 @@ const htmlTemplate = `
         .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 10px; }
         .gallery-item {
             cursor: pointer; 
-            padding: 10px;
+            padding: 10px 0 10px 10px;
             text-align: center; 
             transition: 0.3s; 
             background: #f9f9f9;
@@ -107,7 +107,15 @@ const htmlTemplate = `
         }
         .gallery-item:hover { background: #e0e0e0; }
         .title { font-weight: bold; margin-bottom: 10px; }
-        .content { font-size: 14px; color: #444; overflow: hidden; display: flex; flex-direction: column; }
+        .content { 
+          font-size: 14px;
+          color: #444; 
+          overflow: hidden;
+          overflow-y: auto;
+          scrollbar-gutter: stable;
+          display: flex; 
+          flex-direction: column; 
+        }
         /*p {margin: 0}*/
         h1 {
           font-size: 20px;

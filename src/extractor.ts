@@ -12,7 +12,6 @@ import fs from 'node:fs'
 import path from 'path'
 import minimist from 'minimist'
 import TurndownService from 'turndown'
-import { URLS } from './fanbox/constants.js'
 import { StoredCookies } from './extractor/types.js'
 import {
   downloadFile,
@@ -26,6 +25,18 @@ import { imageExtensions } from './constants.js'
 
 const VISITED_URLS = 'visited.txt'
 
+export const URLS = {
+  patreon: {
+    login: 'https://www.patreon.com/login',
+    host: 'https://www.patreon.com'
+  },
+  pixivFanbox: {
+    login: 'https://accounts.pixiv.net/login',
+    // host is dynamic in format *.fanbox.cc
+    host: 'https://www.*fanbox.cc'
+  }
+} as const
+
 export class Extractor {
   site: keyof typeof URLS = 'patreon' as const
   context: BrowserContext
@@ -37,6 +48,7 @@ export class Extractor {
   turndownService: TurndownService
   stream?: fs.WriteStream
   outDir: string
+  lockedCount = 0
   selectors: Record<string, string> = {
     postUrls: '[data-tag="post-title"] > a',
     imagesClickable:
@@ -521,6 +533,7 @@ export class Extractor {
     if (this.selectors.locked) {
       if ((await page.locator(this.selectors.locked).count()) > 0) {
         console.log('🔒 Locked post, skipping')
+        this.lockedCount += 1
         return
       }
     }

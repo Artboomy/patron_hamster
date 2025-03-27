@@ -130,8 +130,14 @@ export async function main() {
     await oraPromise(runTocHtml(finalDir), 'Generating html gallery...')
   } catch (e) {
     pageUrl = extractor.pageUrl
+    if (extractor.lockedCount) {
+      console.log(`There were ${extractor.lockedCount} locked posts up to now`)
+    }
     await context.close()
     throw e
+  }
+  if (extractor.lockedCount) {
+    console.log(`${extractor.lockedCount} locked posts were not downloaded`)
   }
   console.log('💯 Extractor finished. Press Enter to close the browser.')
   await saveCookies(context)
