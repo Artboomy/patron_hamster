@@ -82,8 +82,9 @@ const htmlTemplate = `
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Markdown Gallery</title>
+    <link href="https://fonts.googleapis.com/css2?family=Spectral&display=swap" rel="stylesheet">
     <style>
-        body { font-family: Arial, sans-serif; margin: 4px; background-color: #f9f9f9 }
+        body { font-family: 'Spectral', 'Roboto', sans-serif; margin: 4px; background-color: #f9f9f9 }
         .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 10px; }
         .gallery-item {
             cursor: pointer; 
@@ -160,12 +161,13 @@ const htmlTemplate = `
                     <meta charset="UTF-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
                     <title>Markdown Preview</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; margin: 20px; }
-                    </style>
+                    <link href="https://fonts.googleapis.com/css2?family=Spectral&display=swap" rel="stylesheet">
                     <style>
                       body {
-                        font-family: Arial, sans-serif;
+                        font-family: 'Spectral', 'Roboto', sans-serif;
+                        font-size: 19px;
+                        line-height: 1.6em;
+                        color: rgb(54, 55, 55);
                         margin: 0; 
                         padding: 0;
                       }
@@ -222,6 +224,7 @@ const htmlTemplate = `
                         background-color: #eaeaea;
                         border: 1px solid #ccc;
                       }
+                      a { color: rgb(54, 55, 55); }
                   </style>
                 </head>
                 <body>
@@ -244,7 +247,6 @@ const htmlTemplate = `
         var images = document.querySelectorAll('.container img')
         console.log(images)
         images.forEach(function(img) {
-          console.log(img)
             img.addEventListener('click', function() {
                 modal.style.display = 'block'
                 modalImg.src = img.src

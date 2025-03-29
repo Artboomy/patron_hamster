@@ -1,4 +1,9 @@
-import { BrowserContext, Page } from 'rebrowser-playwright'
+import {
+  BrowserContext,
+  Locator,
+  Page,
+  Response as PlaywrightResponse
+} from 'rebrowser-playwright'
 import {
   getFileChecker,
   parseDate,
@@ -34,8 +39,88 @@ export const URLS = {
     login: 'https://accounts.pixiv.net/login',
     // host is dynamic in format *.fanbox.cc
     host: 'https://www.*fanbox.cc'
+  },
+  substack: {
+    login: 'https://substack.com/sign-in',
+    // host is dynamic in format *.substack.com
+    host: 'https://*.substack.com'
   }
 } as const
+
+export function imageHook(cfg: {
+  page: Page
+  savedImages: Record<string, boolean>
+  imageIdToName: Record<string, string>
+  checkDesiredImage: (url: string) => boolean
+  checkFileExists: Extractor['checker']
+  getImageId: (url: string) => string
+  postName: string
+  outDir: string
+  timestamp: Date
+  tags: string[]
+}) {
+  const {
+    page,
+    savedImages,
+    imageIdToName,
+    checkDesiredImage,
+    checkFileExists,
+    getImageId,
+    postName,
+    outDir,
+    timestamp,
+    tags
+  } = cfg
+  const listener: (response: PlaywrightResponse) => void = async (response) => {
+    const url = response.url()
+
+    // Check if the response is an image
+    if (
+      checkDesiredImage(url) &&
+      url.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp|jfif|bmp)/)
+    ) {
+      try {
+        const spinner = ora(`Saving image ${url}`).start()
+        const imageId = getImageId(url)
+        if (savedImages[imageId]) {
+          spinner.succeed(`Already saved ${imageId}, skipping`)
+          return
+        }
+        const foundName = checkFileExists(imageId)
+        if (foundName) {
+          spinner.succeed(`Already saved ${imageId}, skipping`)
+          savedImages[imageId] = true
+          imageIdToName[imageId] = foundName
+          return
+        }
+        const buffer = await response.body() // Get image data
+        if (buffer.length) {
+          const { ext } = await fileTypeFromBuffer(buffer).then(
+            (i) => i || { ext: 'file', mime: 'unknown' }
+          )
+          const filename = `${postName}-${imageId}.${ext}`
+          const filePath = path.resolve(outDir, filename)
+          await saveBufferToDisk({
+            buffer,
+            filePath,
+            timestamp,
+            tags,
+            isImage: true
+          })
+          spinner.succeed(`Saved ${filename}`)
+          savedImages[imageId] = true
+          imageIdToName[imageId] = filename
+        } else {
+          spinner.succeed(`⚠  Ignoring zero-size buffer for ${imageId}`)
+        }
+      } catch (error) {
+        console.error(`🚨 Failed to save image from: ${url}`, error)
+      }
+    }
+  }
+  page.on('response', listener)
+  return listener
+}
 
 export class Extractor {
   site: keyof typeof URLS = 'patreon' as const
@@ -49,6 +134,7 @@ export class Extractor {
   stream?: fs.WriteStream
   outDir: string
   lockedCount = 0
+  updateMode = false
   selectors: Record<string, string> = {
     postUrls: '[data-tag="post-title"] > a',
     imagesClickable:
@@ -63,6 +149,7 @@ export class Extractor {
     loadMoreButton: 'button:text("Load more")',
     loader: '[aria-label="loading more posts"]',
     contentTitle: '[data-tag="post-card"] [data-tag="post-title"]',
+    subtitle: '',
     tags: '[data-tag="post-tag"]',
     locked: '',
     noCards: '[data-tag="stream-empty-card"]',
@@ -78,6 +165,7 @@ export class Extractor {
     this.turndownService = new TurndownService()
     const args = minimist(process.argv.slice(2))
     this.outDir = args.dir
+    this.updateMode = args.update
     this.checker = getFileChecker(this.outDir)
     this.loadVisited()
   }
@@ -183,6 +271,10 @@ export class Extractor {
     }
   }
 
+  isAllPostsUrl(): boolean {
+    return this.sourceUrl.endsWith('/posts')
+  }
+
   async extract(sourceUrl: string, rawYear?: string) {
     console.log('🎬 Starting extractor')
     if (this.site === 'pixivFanbox') {
@@ -192,7 +284,7 @@ export class Extractor {
     this.sourceUrl = sourceUrl.split('?')[0]
     this.pageUrl = sourceUrl
     this.beforeExtractCheck(sourceUrl, year)
-    if (this.sourceUrl.endsWith('/posts')) {
+    if (this.isAllPostsUrl()) {
       if (year) {
         console.log(`| All posts mode. Extracting from year ${year}`)
       } else {
@@ -225,9 +317,15 @@ export class Extractor {
       fs.mkdirSync(dirPath, { recursive: true })
     }
     let hasMore = true
+    let urlCount = 0
+    let updateModeThreshold = 0
     while (hasMore) {
       await this.randomScroll(this.page)
       const urls = await this.getPostUrls()
+      if (urlCount === urls.length) {
+        break
+      }
+      urlCount = urls.length
       let page: Page | null = null
       for (const url of urls) {
         if (!this.visited.has(url)) {
@@ -236,13 +334,23 @@ export class Extractor {
           await randomMouseMovements(page)
           page = await this.savePost(url, dirPath, page)
           this.pushVisited(url)
+        } else if (this.updateMode) {
+          updateModeThreshold += 1
+          // fanbox has pinned posts which may result in false updated state
+          if (updateModeThreshold > 2) {
+            hasMore = false
+            console.log('Reached processed post, exiting update mode.')
+            break
+          }
         }
       }
-      try {
-        hasMore = await this.loadMore(this.page)
-      } catch (e) {
-        console.error(e)
-        throw e
+      if (hasMore) {
+        try {
+          hasMore = await this.loadMore(this.page)
+        } catch (e) {
+          console.error(e)
+          throw e
+        }
       }
     }
     this.closeStream()
@@ -280,7 +388,7 @@ export class Extractor {
   async getPostDate(page: Page) {
     await this.cloudflareGuard(page, 'getPostDate', page)
     const dateStr = await page
-      .locator('[data-tag="post-details"]')
+      .locator('[data-tag="post-card"] [data-tag="post-details"]')
       .locator('xpath=../../div[1]/div[1]/div[2]')
       .locator('p')
       .innerText()
@@ -337,49 +445,18 @@ export class Extractor {
     console.log(`| Post date: ${timestamp}`)
     const savedImages: Record<string, boolean> = {}
     const imageIdToName: Record<string, string> = {}
-    page.on('response', async (response) => {
-      const url = response.url()
-
-      // Check if the response is an image
-      if (
-        url.includes('eyJxIjoxMDAsIndlYnAiOjB9') &&
-        url.includes(id) &&
-        url.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp|jfif|bmp)/)
-      ) {
-        try {
-          const spinner = ora(`Saving image ${url}`).start()
-          const imageId = url.split('?')[0].split('/').at(-3) as string
-          if (savedImages[imageId]) {
-            spinner.succeed(`Already saved ${imageId}, skipping`)
-            return
-          }
-          const foundName = this.checker(imageId)
-          if (foundName) {
-            spinner.succeed(`Already saved ${imageId}, skipping`)
-            savedImages[imageId] = true
-            imageIdToName[imageId] = foundName
-            return
-          }
-          const buffer = await response.body() // Get image data
-          const { ext } = await fileTypeFromBuffer(buffer).then(
-            (i) => i || { ext: 'file', mime: 'unknown' }
-          )
-          const filename = `${name}-${imageId}.${ext}`
-          const filePath = path.resolve(outDir, filename)
-          await saveBufferToDisk({
-            buffer,
-            filePath,
-            timestamp,
-            tags,
-            isImage: true
-          })
-          spinner.succeed(`Saved ${filename}`)
-          savedImages[imageId] = true
-          imageIdToName[imageId] = filename
-        } catch (error) {
-          console.error(`🚨 Failed to save image from: ${url}`, error)
-        }
-      }
+    imageHook({
+      page,
+      savedImages,
+      imageIdToName,
+      checkDesiredImage: (url: string) =>
+        url.includes('eyJxIjoxMDAsIndlYnAiOjB9') && url.includes(id),
+      checkFileExists: (i: string) => this.checker(i),
+      getImageId: (u: string) => u.split('?')[0].split('/').at(-3) as string,
+      postName: name,
+      outDir,
+      timestamp,
+      tags
     })
     const imagesToClick = page.locator(this.selectors.imagesClickable)
     const staticImageUrls = (
@@ -418,32 +495,7 @@ export class Extractor {
       const nextButton = page.locator(this.selectors.nextImageButton)
       const hasNextButton = (await nextButton.count()) > 0
       if (hasNextButton) {
-        let i = 1
-        while (i < imageCount) {
-          console.log(`⏲ Waiting for image ${i + 1}/${imageCount} to load`)
-          await page.evaluate((selector) => {
-            return new Promise<void>((resolve) => {
-              // @ts-ignore page ctx
-              const img = document.querySelector(selector) as HTMLImageElement
-              if (!img) {
-                resolve() // Resolve immediately if no image found
-                return
-              }
-
-              if (img.complete && img.naturalWidth > 0) {
-                resolve() // Image is already loaded
-              } else {
-                img.onload = () => resolve()
-                img.onerror = () => resolve() // Resolve even if the image fails to load
-              }
-            })
-          }, this.selectors.bigImage)
-          // console.log('→ Clicking next button')
-          await nextButton.click()
-          // console.log('→ Clicked next button')
-          await waitForDelay(Math.floor(Math.random() * 1000 + 100))
-          i++
-        }
+        await this.iterateCarousel(imageCount, page, nextButton)
       }
     } else {
       console.log('☠ Found 0 urls')
@@ -457,11 +509,52 @@ export class Extractor {
     return imageIdToName
   }
 
-  async getPostTitle(page: Page) {
+  async iterateCarousel(imageCount: number, page: Page, nextButton: Locator) {
+    let i = 1
+    while (i < imageCount) {
+      await oraPromise(
+        page.evaluate((selector) => {
+          return new Promise<void>((resolve) => {
+            // @ts-ignore page ctx
+            const img = document.querySelector(selector) as HTMLImageElement
+            if (!img) {
+              resolve() // Resolve immediately if no image found
+              return
+            }
+
+            if (img.complete && img.naturalWidth > 0) {
+              resolve() // Image is already loaded
+            } else {
+              img.onload = () => resolve()
+              img.onerror = () => resolve() // Resolve even if the image fails to load
+            }
+          })
+        }, this.selectors.bigImage),
+        `Waiting for image ${i + 1}/${imageCount} to load`
+      )
+      await page.locator(this.selectors.bigImage).hover()
+      await nextButton.click()
+      await waitForDelay(Math.floor(Math.random() * 1000 + 100))
+      i++
+    }
+  }
+
+  async getPostTitle(page: Page): Promise<string> {
     return await page.locator(this.selectors.contentTitle).innerText()
   }
 
-  async getPageName(page: Page) {
+  async getPostSubtitle(page: Page): Promise<string> {
+    if (!this.selectors.subtitle) {
+      return ''
+    }
+    const loc = page.locator(this.selectors.subtitle)
+    if ((await loc.count()) > 0) {
+      return await loc.innerText()
+    }
+    return ''
+  }
+
+  async getPageName(page: Page): Promise<string> {
     return await page.evaluate(() =>
       // @ts-ignore this is browser context
       location.pathname.replace('/posts/', '')
@@ -480,7 +573,7 @@ export class Extractor {
     page: Page
     outDir: string
     timestamp: Date
-  }) {
+  }): Promise<string[]> {
     const urlLocator = page.locator(this.selectors.attachments)
     const urls: Array<{ href: string; filename: string }> = (
       await urlLocator.evaluateAll((elements) =>
@@ -555,10 +648,12 @@ export class Extractor {
       site: this.site,
       attachments
     })
+    // fs.writeFileSync('test.html', html, 'utf8')
     const title = await this.getPostTitle(page)
+    const subtitle = await this.getPostSubtitle(page)
     const content = this.turndownService.turndown(html)
     let markdown = `# [${title}](${page.url()})
-
+${subtitle ? '\n#### *' + subtitle + '*\n' : ''}
 *Date: ${timestamp.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}*
 
 ${content}
@@ -574,12 +669,18 @@ ${content}
     }
     const mdPath = path.resolve(outDir, name + '.md')
     fs.writeFileSync(mdPath, markdown)
+    fs.writeFileSync(
+      path.resolve(outDir, name + '.json'),
+      JSON.stringify({
+        title: title,
+        date: timestamp.getTime()
+      })
+    )
     if (timestamp) {
       try {
-        // console.log('* Setting file time to', mdPath, timestamp)
         fs.utimesSync(mdPath, timestamp, timestamp)
       } catch (e) {
-        console.log('* Failed to set md time', e)
+        console.log('❌ Failed to set md time', e)
       }
     }
   }

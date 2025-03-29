@@ -60,17 +60,13 @@ export class FanboxExtractor extends Extractor {
     }
   }
 
-  async getPostTitle(page: Page) {
-    return await page.locator(this.selectors.contentTitle).innerText()
-  }
-
   getContentBlock(page: Page) {
     return page.locator(
       `${this.selectors.contentBlock}, ${this.selectors.richContentBlock}`
     )
   }
 
-  async getPageName(page: Page) {
+  async getPageName(page: Page): Promise<string> {
     return await page.evaluate(
       () =>
         // @ts-ignore this is browser context

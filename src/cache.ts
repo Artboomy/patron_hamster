@@ -210,7 +210,7 @@ function ensureCacheDir(site: string) {
 // ----- 4) The main function with Playwright logic -----
 export async function runCache(
   context: BrowserContext,
-  site: 'patreon' | 'pixivFanbox'
+  site: 'patreon' | 'pixivFanbox' | 'substack'
 ) {
   const cacheDir = ensureCacheDir(site)
 
@@ -237,7 +237,9 @@ export async function runCache(
         return route.abort()
       }
       if (
-        !['fanbox', 'patreon', 'pximg', 'pixiv'].some((s) => rawUrl.includes(s))
+        !['fanbox', 'patreon', 'pximg', 'pixiv', 'substack'].some((s) =>
+          rawUrl.includes(s)
+        )
       ) {
         // console.log('Uncachable url', rawUrl)
         return route.continue()

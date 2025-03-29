@@ -5,11 +5,13 @@
     "build": "tsc",
     "launch": "yarn run build && node dist/index.js",
     "toc:md": "yarn run build && node dist/generateTOCmd.js",
-    "toc:html": "yarn run build && node dist/generateTOChtml.js"
+    "toc:html": "yarn run build && node dist/generateTOChtml.js",
+    "epub": "yarn run build && node dist/scripts/epub.js"
   },
   "type": "module",
   "dependencies": {
     "cheerio": "^1.0.0",
+    "epub-gen-memory": "1.1.2",
     "exiftool-vendored": "^29.1.0",
     "file-type": "^20.1.0",
     "marked": "^15.0.7",

@@ -1,17 +1,18 @@
 # 🐹 PatronHamster
 
-This is a content extractor for Patreon and Pixiv Fanbox sites. 
+This is a content extractor for Patreon, Pixiv Fanbox, Substack sites. 
 
 It leverages [Playwright](https://playwright.dev/) to open Chrome instance and downloads posts, images and attachments automatically.
 
 ## 💯 Features
 
-* Supports Patreon and Pixiv Fanbox
+* Supported sites: Patreon, Pixiv Fanbox, Substack
 * Each post is downloaded as [markdown](https://en.wikipedia.org/wiki/Markdown) file + images + attachments
 * Even large attachments can be downloaded - up to 100s of MB
 * HTML preview gallery generation - to view in the browser
 * Local files cache for loading speed up - up to 95% hit rate
 * Processed URLs are recorded to avoid extra traffic
+* Substack only: epub generation 
 
 ## ✍️ Prerequisites
 
@@ -61,14 +62,23 @@ yarn run launch --url <post url> --dir mypost
 ```
 
 ### Update downloads on fresh posts
+Add `--update` flag. It will stop fetching if processed posts are encountered.
 
-Just launch download command again, it will fetch new posts and ignore the rest.
+```shell
+yarn run launch --recover --update --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
+```
 
 ## Generate html gallery (executed automatically in any launch command)
 
 Example:
 ```shell
 yarn run toc:html --dir "C:\patreon_extractor\output\creator\2025"
+```
+
+## Generate epub (for Substack only)
+
+```shell
+yarn run epub --dir "C:\patreon_extractor\output\creator\"
 ```
 
 Gallery will open in the default system browser. If not, you can find `gallery.html` file in the directory you provided.

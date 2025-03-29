@@ -85,13 +85,32 @@ export function patchLinks({
 }: {
   html: string
   imageMap: Record<string, string>
-  site: 'patreon' | 'pixivFanbox'
+  site: 'patreon' | 'pixivFanbox' | 'substack'
   attachments: string[]
 }): string {
   const $ = cheerio.load(html) // Load HTML into Cheerio
+  if (site === 'substack') {
+    // remove garbage blocks
+    $('.subscription-widget-wrap').remove()
+    // clean up headers
+    $('h2.header-anchor-post').each((_, el) => {
+      const text = $(el).text() // Get the full visible text (ignores HTML tags)
+      $(el).html(text) // Replace inner HTML with plain text
+    })
+    // prevent list conversion
+    $('p span').each((_, el) => {
+      const text = $(el).text()
+      if (/^\d+\.$/.test(text.trim())) {
+        $(el).text(`\u200B${text}`) // Add a non-breaking space
+      }
+    })
+  }
   if (site === 'pixivFanbox') {
     // videos will be extracted from attachments later
     $('video').remove()
+  }
+
+  if (site === 'substack' || site === 'pixivFanbox') {
     // hoisting (for Pixiv)
     $('img').each((_, img) => {
       let src = $(img).attr('src')
@@ -202,4 +221,23 @@ export function getFileChecker(directory: string) {
   return (id: string) => {
     return files.find((file) => file.includes(id)) || null
   }
+}
+
+export async function humanLikeScrollToBottom(page: Page) {
+  await page.evaluate(async () => {
+    const delay = (ms: number) => new Promise((res) => setTimeout(res, ms))
+
+    let totalHeight = 0
+    const distance = 100 + Math.random() * 50 // variable step size
+
+    // @ts-ignore page ctx
+    while (totalHeight < document.body.scrollHeight) {
+      // @ts-ignore page ctx
+      window.scrollBy(0, distance)
+      totalHeight += distance
+
+      const sleepTime = 100 + Math.random() * 200 // variable delay
+      await delay(sleepTime)
+    }
+  })
 }

@@ -13,6 +13,7 @@ const cacheDir = path.resolve('./playwright-cache')
 
 import { exec } from 'child_process'
 import { clearInterval } from 'node:timers'
+import { SubstackExtractor } from './extractor/substack.js'
 function readCookies(): Cookie[] {
   try {
     return JSON.parse(fs.readFileSync(fileName, 'utf8'))
@@ -96,11 +97,13 @@ export async function main() {
     }
   }
   const context = await chromium.launchPersistentContext(cacheDir, cfg)
-  let site: 'patreon' | 'pixivFanbox'
+  let site: 'patreon' | 'pixivFanbox' | 'substack'
   if (url.includes('patreon')) {
     site = 'patreon'
   } else if (url.includes('fanbox')) {
     site = 'pixivFanbox'
+  } else if (url.includes('substack')) {
+    site = 'substack'
   } else {
     console.warn('Unrecognized site')
     process.exit(0)
@@ -115,6 +118,8 @@ export async function main() {
     extractor = new Extractor(page, context)
   } else if (site === 'pixivFanbox') {
     extractor = new FanboxExtractor(page, context)
+  } else if (site === 'substack') {
+    extractor = new SubstackExtractor(page, context)
   } else {
     throw Error('Unsupported url')
   }
