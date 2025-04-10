@@ -322,7 +322,7 @@ export class Extractor {
     while (hasMore) {
       await this.randomScroll(this.page)
       const urls = await this.getPostUrls()
-      if (urlCount === urls.length) {
+      if (this.site === 'patreon' && urlCount === urls.length) {
         break
       }
       urlCount = urls.length
