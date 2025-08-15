@@ -1,6 +1,6 @@
 import readline from 'node:readline'
 import * as cheerio from 'cheerio'
-import { Page } from 'rebrowser-playwright'
+import type { ScraperPage } from './extractor/pageTypes.js'
 import fs from 'node:fs'
 import path from 'path'
 
@@ -184,7 +184,7 @@ export function patchLinks({
  * @param page Playwright Page instance.
  * @param moveCount How many random moves to perform (default 5).
  */
-export async function randomMouseMovements(page: Page, moveCount = 5) {
+export async function randomMouseMovements(page: ScraperPage, moveCount = 5) {
   // Get the viewport dimensions so we can choose random positions    // Get viewport size using page.evaluate()
   const viewport = await page.evaluate(() => {
     //@ts-ignore page ctx
@@ -223,7 +223,7 @@ export function getFileChecker(directory: string) {
   }
 }
 
-export async function humanLikeScrollToBottom(page: Page) {
+export async function humanLikeScrollToBottom(page: ScraperPage) {
   await page.evaluate(async () => {
     const delay = (ms: number) => new Promise((res) => setTimeout(res, ms))
 

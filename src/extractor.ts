@@ -1,12 +1,11 @@
-import {
-  BrowserContext,
-  Locator,
-  Page,
-  Response as PlaywrightResponse
-} from 'rebrowser-playwright'
+import type {
+  ScraperContext,
+  ScraperLocator,
+  ScraperPage,
+  ScraperResponse
+} from './extractor/pageTypes.js'
 import {
   getFileChecker,
-  parseDate,
   randomMouseMovements,
   patchLinks,
   waitForDelay,
@@ -21,6 +20,7 @@ import { StoredCookies } from './extractor/types.js'
 import {
   downloadFile,
   linkToBuffer,
+  resolveOutputFilePath,
   saveBufferToDisk
 } from './extractor/utils.js'
 import { saveCookies } from './saveCookies.js'
@@ -47,8 +47,16 @@ export const URLS = {
   }
 } as const
 
+export function getPatreonPostNameFromPathname(pathname: string): string {
+  const postSegment = pathname.split('/posts/').at(1)
+  if (postSegment) {
+    return postSegment.split('/')[0] || ''
+  }
+  return pathname.split('/').filter(Boolean).at(-1) || ''
+}
+
 export function imageHook(cfg: {
-  page: Page
+  page: ScraperPage
   savedImages: Record<string, boolean>
   imageIdToName: Record<string, string>
   checkDesiredImage: (url: string) => boolean
@@ -71,7 +79,7 @@ export function imageHook(cfg: {
     timestamp,
     tags
   } = cfg
-  const listener: (response: PlaywrightResponse) => void = async (response) => {
+  const listener: (response: ScraperResponse) => void = async (response) => {
     const url = response.url()
 
     // Check if the response is an image
@@ -95,17 +103,18 @@ export function imageHook(cfg: {
         }
         const buffer = await response.body() // Get image data
         if (buffer.length) {
-          const { ext } = await fileTypeFromBuffer(buffer).then(
+          const { ext, mime } = await fileTypeFromBuffer(buffer).then(
             (i) => i || { ext: 'file', mime: 'unknown' }
           )
-          const filename = `${postName}-${imageId}.${ext}`
-          const filePath = path.resolve(outDir, filename)
+          const filename = path.basename(`${postName}-${imageId}.${ext}`)
+          const filePath = resolveOutputFilePath(outDir, filename)
           await saveBufferToDisk({
             buffer,
             filePath,
             timestamp,
             tags,
-            isImage: true
+            isImage: true,
+            mimeType: mime
           })
           spinner.succeed(`Saved ${filename}`)
           savedImages[imageId] = true
@@ -124,8 +133,8 @@ export function imageHook(cfg: {
 
 export class Extractor {
   site: keyof typeof URLS = 'patreon' as const
-  context: BrowserContext
-  page: Page
+  context: ScraperContext
+  page: ScraperPage
   sourceUrl: string = ''
   pageUrl: string = ''
   visited: Set<string>
@@ -137,15 +146,16 @@ export class Extractor {
   updateMode = false
   selectors: Record<string, string> = {
     postUrls: '[data-tag="post-title"] > a',
-    imagesClickable:
-      '[data-tag="post-card"] .image-grid > img, [data-tag="post-card"]  .image-carousel > img',
+    imagesClickable: '[data-tag="post-card"] [data-tag="gallery-image"]',
     bigImage: '[data-tag="lightboxImage"]',
     nextImageButton: '[data-tag="nextImage"]',
-    filterHeader: '[data-tag="filter-dialog-modal-title"]',
-    filterButton: '[data-tag="post-feed-consolidated-filters-toggle"]',
-    onlyUnblockedFilter: 'input[value="UNLOCKED_POSTS_ONLY"]',
-    yearFilter: 'fieldset[name="consolidated-date-filter"] p',
-    applyButton: '[data-tag="dialog-action-primary"]',
+    filterHeader: 'h2:has-text("Filter Posts")',
+    filterButton:
+      '[data-tag="post-feed-filter-toggle"], button[aria-label="post feed filters toggle"]',
+    onlyUnblockedFilter:
+      'button[role="switch"][aria-label="Show only posts I can access"]',
+    yearFilter: 'input[name="post-filter-date"]',
+    applyButton: 'button:has-text("Apply filters")',
     loadMoreButton: 'button:text("Load more")',
     loader: '[aria-label="loading more posts"]',
     contentTitle: '[data-tag="post-card"] [data-tag="post-title"]',
@@ -157,7 +167,7 @@ export class Extractor {
   }
   checker: (id: string) => string | null
 
-  constructor(page: Page, context: BrowserContext) {
+  constructor(page: ScraperPage, context: ScraperContext) {
     this.context = context
     this.page = page
     this.visited = new Set()
@@ -174,18 +184,21 @@ export class Extractor {
   async _getYears() {
     console.log('Getting available years for filtering')
 
-    await this.page.locator(this.selectors.filterButton).click()
+    await this.page.locator(this.selectors.filterButton).first().click()
     console.log('| Opened filter modal')
 
     const years: string[] = await this.page
       .locator(this.selectors.yearFilter)
       .evaluateAll((elements) =>
-        elements.reduce((acc, e) => {
-          const i = e.innerText
-          if (!i.startsWith('20')) return acc
-          acc.push(i.split(' ')[0])
-          return acc
-        }, [])
+        (elements as Array<{ innerText: string }>).reduce<string[]>(
+          (acc, e) => {
+            const i = e.innerText || ''
+            if (!i.startsWith('20')) return acc
+            acc.push(i.split(' ')[0])
+            return acc
+          },
+          []
+        )
       )
     console.log(`| Extracted years: ${years.join(', ')}`)
 
@@ -215,7 +228,7 @@ export class Extractor {
     }
   }
 
-  async waitForBigImage(page: Page) {
+  async waitForBigImage(page: ScraperPage) {
     await page.waitForSelector(this.selectors.bigImage, { state: 'attached' })
   }
 
@@ -226,21 +239,22 @@ export class Extractor {
     console.log(`Applying filter by year ${year}`)
 
     if ((await this.page.locator(this.selectors.filterHeader).count()) === 0) {
-      await this.page.locator(this.selectors.filterButton).click()
+      await this.page.locator(this.selectors.filterButton).first().click()
       console.log('| Opened filter modal')
     } else {
       console.log('| Filter modal already open')
     }
 
     await this.page
-      .locator(this.selectors.yearFilter, {
-        hasText: new RegExp(`^${year} \\(\\d+\\)$`)
-      })
+      .locator(`${this.selectors.yearFilter}[value="${year}"]`)
       .click()
     console.log(`| Selected ${year} year`)
     await waitForDelay(Math.random() * 1000)
 
-    await this.page.locator(this.selectors.onlyUnblockedFilter).click()
+    const onlyAccessible = this.page.locator(this.selectors.onlyUnblockedFilter)
+    if ((await onlyAccessible.getAttribute('aria-checked')) !== 'true') {
+      await onlyAccessible.click()
+    }
     console.log('| Selected only accessible')
     await waitForDelay(Math.random() * 1000)
 
@@ -255,7 +269,7 @@ export class Extractor {
     await oraPromise(this.waitForPosts(), 'Waiting for posts')
   }
 
-  async randomScroll(page: Page) {
+  async randomScroll(page: ScraperPage) {
     await this.cloudflareGuard(page, 'randomScroll', page)
     const randomY = Math.floor(Math.random() * 1000) + 200 // Random offset
     // @ts-ignore page ctx
@@ -266,7 +280,10 @@ export class Extractor {
     const [sourceUrl, year] = args
     if (sourceUrl.endsWith('/posts')) {
       if (!year || year === 'undefined') {
-        throw Error('No year provided')
+        const error = Error('No year provided')
+        // @ts-ignore custom
+        error.recoverable = false
+        throw error
       }
     }
   }
@@ -326,12 +343,11 @@ export class Extractor {
         break
       }
       urlCount = urls.length
-      let page: Page | null = null
+      let page: ScraperPage | null = null
       for (const url of urls) {
         if (!this.visited.has(url)) {
           await waitForDelay()
           page = page || (await this.context.newPage())
-          await randomMouseMovements(page)
           page = await this.savePost(url, dirPath, page)
           this.pushVisited(url)
         } else if (this.updateMode) {
@@ -358,7 +374,7 @@ export class Extractor {
   }
 
   async cloudflareGuard(
-    page: Page,
+    page: ScraperPage,
     fnName:
       | 'randomScroll'
       | 'getPostDate'
@@ -385,22 +401,23 @@ export class Extractor {
     }
   }
 
-  async getPostDate(page: Page) {
+  async getPostDate(page: ScraperPage) {
     await this.cloudflareGuard(page, 'getPostDate', page)
     const dateStr = await page
-      .locator('[data-tag="post-card"] [data-tag="post-details"]')
-      .locator('xpath=../../div[1]/div[1]/div[2]')
-      .locator('p')
-      .innerText()
+      .locator('meta[property="article:published_time"]')
+      .getAttribute('content')
+    if (!dateStr) throw new Error('Post publication date not found')
     console.log(`| Raw date str: ${dateStr}`)
-    return parseDate(dateStr)
+    return new Date(dateStr)
   }
 
-  async getTags(page: Page): Promise<string[]> {
+  async getTags(page: ScraperPage): Promise<string[]> {
     await this.cloudflareGuard(page, 'getTags', page)
     return await page
       .locator(this.selectors.tags)
-      .evaluateAll((elements) => elements.map((i) => i.innerText))
+      .evaluateAll((elements) =>
+        (elements as Array<{ innerText: string }>).map((i) => i.innerText)
+      )
   }
 
   relativeUrlToAbsoluteUrl(url: string): string {
@@ -409,7 +426,11 @@ export class Extractor {
     return url.startsWith('https:') ? url : hostname + url
   }
 
-  async savePost(url: string, outDir: string, page: Page): Promise<Page> {
+  async savePost(
+    url: string,
+    outDir: string,
+    page: ScraperPage
+  ): Promise<ScraperPage> {
     console.log(`\nSaving post ${url} into ${outDir}`)
     if (page.url() !== url) {
       await page.goto(this.relativeUrlToAbsoluteUrl(url), {
@@ -422,15 +443,12 @@ export class Extractor {
     return page
   }
 
-  getContentBlock(page: Page) {
-    return page
-      .locator('[data-tag="post-details"]')
-      .locator('xpath=../../div[1]/div[2]')
-      .first()
+  getContentBlock(page: ScraperPage) {
+    return page.locator('.patreon-post-content').first()
   }
 
   async saveImageOnlyPost(cfg: {
-    page: Page
+    page: ScraperPage
     outDir: string
     timestamp: Date
     tags: string[]
@@ -459,12 +477,55 @@ export class Extractor {
       tags
     })
     const imagesToClick = page.locator(this.selectors.imagesClickable)
+    const visibleImageIndexes = await imagesToClick.evaluateAll((elements) => {
+      function isVisible(el: unknown) {
+        const element = el as {
+          parentElement: unknown
+          nodeType?: number
+        } | null
+        if (!element || element.nodeType !== 1) return false
+
+        for (
+          let node = element as {
+            parentElement: unknown
+          } | null;
+          node;
+          node = node.parentElement as { parentElement: unknown } | null
+        ) {
+          const style = (
+            globalThis as unknown as {
+              getComputedStyle: (n: unknown) => {
+                display: string
+                visibility: string
+                opacity: string
+              }
+            }
+          ).getComputedStyle(node)
+          if (style.display === 'none') return false
+          if (style.visibility === 'hidden') return false
+          if (style.opacity === '0') return false
+        }
+
+        return true
+      }
+
+      return elements.reduce<number[]>((acc, el, idx) => {
+        if (isVisible(el)) acc.push(idx)
+        return acc
+      }, [])
+    })
     const staticImageUrls = (
       await this.getContentBlock(page)
         .locator('img')
-        .evaluateAll((elements) => elements.map((el) => el.getAttribute('src')))
-    ).filter((i) => i.includes(id))
-    const imageCount = await imagesToClick.count()
+        .evaluateAll((elements) =>
+          (
+            elements as Array<{
+              getAttribute: (attr: string) => string | null
+            }>
+          ).map((el) => el.getAttribute('src'))
+        )
+    ).filter((i): i is string => Boolean(i && i.includes(id)))
+    const imageCount = visibleImageIndexes.length
     console.log(
       `Found ${imageCount} clickable images, ${staticImageUrls.length} static images`
     )
@@ -489,7 +550,9 @@ export class Extractor {
     }
     if (imageCount) {
       console.log(`↓ Downloading ${imageCount} multiple images`)
-      await imagesToClick.nth(0).click({ force: true })
+      await imagesToClick.nth(visibleImageIndexes[0] as number).click({
+        force: true
+      })
       // wait for initial carousel load
       await this.waitForBigImage(page)
       const nextButton = page.locator(this.selectors.nextImageButton)
@@ -509,7 +572,11 @@ export class Extractor {
     return imageIdToName
   }
 
-  async iterateCarousel(imageCount: number, page: Page, nextButton: Locator) {
+  async iterateCarousel(
+    imageCount: number,
+    page: ScraperPage,
+    nextButton: ScraperLocator
+  ) {
     let i = 1
     while (i < imageCount) {
       await oraPromise(
@@ -539,11 +606,11 @@ export class Extractor {
     }
   }
 
-  async getPostTitle(page: Page): Promise<string> {
+  async getPostTitle(page: ScraperPage): Promise<string> {
     return await page.locator(this.selectors.contentTitle).innerText()
   }
 
-  async getPostSubtitle(page: Page): Promise<string> {
+  async getPostSubtitle(page: ScraperPage): Promise<string> {
     if (!this.selectors.subtitle) {
       return ''
     }
@@ -554,11 +621,12 @@ export class Extractor {
     return ''
   }
 
-  async getPageName(page: Page): Promise<string> {
-    return await page.evaluate(() =>
+  async getPageName(page: ScraperPage): Promise<string> {
+    const pathname = await page.evaluate(() =>
       // @ts-ignore this is browser context
-      location.pathname.replace('/posts/', '')
+      location.pathname
     )
+    return getPatreonPostNameFromPathname(pathname)
   }
 
   getAttachmentName(_href: string, filename: string) {
@@ -570,16 +638,16 @@ export class Extractor {
     outDir,
     timestamp
   }: {
-    page: Page
+    page: ScraperPage
     outDir: string
     timestamp: Date
   }): Promise<string[]> {
     const urlLocator = page.locator(this.selectors.attachments)
     const urls: Array<{ href: string; filename: string }> = (
       await urlLocator.evaluateAll((elements) =>
-        elements.map((i) => ({
-          href: i.href,
-          filename: i.innerText.replaceAll(/\s/g, '-')
+        (elements as Array<{ href: string; innerText: string }>).map((i) => ({
+          href: i.href || '',
+          filename: (i.innerText || '').replaceAll(/\s/g, '-')
         }))
       )
     ).map((i) => ({
@@ -595,31 +663,33 @@ export class Extractor {
     let i = 0
     for (const { href, filename } of urls) {
       const spinner = ora(`Saving file ${href} to ${filename}.`).start()
-      if (this.checker(filename)) {
-        spinner.succeed(`File ${filename} already exists, skipping`)
-        list.push(filename)
+      const outputFileName = path.basename(filename)
+      if (this.checker(outputFileName)) {
+        spinner.succeed(`File ${outputFileName} already exists, skipping`)
+        list.push(outputFileName)
         continue
       }
       if (imageExtensions.some((z) => href.endsWith(z))) {
         // console.log(`Direct download for ${href}`)
         const img = await linkToBuffer(page, href)
-        await downloadFile(href, outDir, filename, timestamp, [], img)
+        await downloadFile(href, outDir, outputFileName, timestamp, [], img)
       } else {
         const [download] = await Promise.all([
           page.waitForEvent('download'),
           urlLocator.nth(i).click()
         ])
-        await download.saveAs(path.resolve(outDir, filename))
-        fs.utimesSync(path.resolve(outDir, filename), timestamp, timestamp)
+        const filePath = resolveOutputFilePath(outDir, outputFileName)
+        await download.saveAs(filePath)
+        fs.utimesSync(filePath, timestamp, timestamp)
       }
-      list.push(filename)
+      list.push(outputFileName)
       spinner.succeed()
       i++
     }
     return list
   }
 
-  async saveFullPost(page: Page, outDir: string) {
+  async saveFullPost(page: ScraperPage, outDir: string) {
     await page.waitForSelector(this.selectors.loader, {
       state: 'detached'
     })
@@ -667,10 +737,10 @@ ${content}
     if (tags.length) {
       markdown += `\n\n ## Tags\n ${tags.map((t) => '`' + t + '`').join(' ')}`
     }
-    const mdPath = path.resolve(outDir, name + '.md')
+    const mdPath = resolveOutputFilePath(outDir, name + '.md')
     fs.writeFileSync(mdPath, markdown)
     fs.writeFileSync(
-      path.resolve(outDir, name + '.json'),
+      resolveOutputFilePath(outDir, name + '.json'),
       JSON.stringify({
         title: title,
         date: timestamp.getTime()
@@ -693,7 +763,7 @@ ${content}
           .split('\n')
           .filter(Boolean)
       )
-      console.log(`Loaded ${this.visited.size} entries`)
+      console.log(`Loaded ${this.visited.size} visited entries`)
     } catch (_e) {
       console.log('Failed to load visited with error', _e)
       this.visited = new Set<string>()
@@ -723,9 +793,14 @@ ${content}
 
     const list = await this.page
       .locator(this.selectors.postUrls)
-      .evaluateAll((elements) => elements.map((el) => el.getAttribute('href')))
+      .evaluateAll((elements) =>
+        (
+          elements as Array<{ getAttribute: (attr: string) => string | null }>
+        ).map((el) => el.getAttribute('href'))
+      )
+    const filtered = list.filter((i): i is string => Boolean(i))
     console.log('| Urls from this page: ', list.join(', '))
-    return list
+    return filtered
   }
 
   getFlags(): Record<string, boolean> {
@@ -740,9 +815,18 @@ ${content}
     return flags[this.site]
   }
 
-  async doLogin(cookies: StoredCookies) {
+  async doLogin(
+    cookies: StoredCookies,
+    options?: {
+      skipCookies?: boolean
+    }
+  ) {
     const flags = this.getFlags()
+    const skipCookies = Boolean(options?.skipCookies)
     if (this.isLoggedIn(flags)) {
+      if (skipCookies) {
+        return
+      }
       return this.context.addCookies(cookies)
     }
     await this.page.goto(URLS[this.site].login)
@@ -753,14 +837,17 @@ ${content}
       JSON.stringify({ ...flags, [this.site]: true }),
       'utf8'
     )
+    if (skipCookies) {
+      return
+    }
     return this.context.addCookies(cookies)
   }
 
-  getLoadMoreButton(page: Page) {
+  getLoadMoreButton(page: ScraperPage) {
     return page.locator('button', { hasText: /^Load more$/ })
   }
 
-  async loadMore(page: Page) {
+  async loadMore(page: ScraperPage) {
     console.log('Loading more pages')
     const button = this.getLoadMoreButton(page)
     if ((await button.count()) === 0) {

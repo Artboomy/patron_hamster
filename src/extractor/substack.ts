@@ -1,5 +1,5 @@
 import { Extractor, imageHook } from '../extractor.js'
-import { Page } from 'rebrowser-playwright'
+import type { ScraperPage } from './pageTypes.js'
 import ora, { oraPromise } from 'ora'
 import {
   humanLikeScrollToBottom,
@@ -35,11 +35,11 @@ export class SubstackExtractor extends Extractor {
     // pass
   }
 
-  async getTags(_page: Page): Promise<string[]> {
+  async getTags(_page: ScraperPage): Promise<string[]> {
     return []
   }
 
-  async getPostDate(page: Page): Promise<Date> {
+  async getPostDate(page: ScraperPage): Promise<Date> {
     const str = await page.evaluate((selector) => {
       // @ts-ignore page ctx
       const el = document.querySelector(selector)
@@ -56,11 +56,11 @@ export class SubstackExtractor extends Extractor {
     }
     return new Date()
   }
-  getContentBlock(page: Page) {
+  getContentBlock(page: ScraperPage) {
     return page.locator(this.selectors.contentBlock)
   }
 
-  async getPageName(page: Page): Promise<string> {
+  async getPageName(page: ScraperPage): Promise<string> {
     return await page.evaluate(
       () =>
         // @ts-ignore this is browser context
@@ -69,7 +69,7 @@ export class SubstackExtractor extends Extractor {
   }
 
   async saveImageOnlyPost(cfg: {
-    page: Page
+    page: ScraperPage
     outDir: string
     timestamp: Date
     tags: string[]
@@ -120,7 +120,9 @@ export class SubstackExtractor extends Extractor {
     }
     const links: string[] = await page
       .locator(this.selectors.imageAnchor)
-      .evaluateAll((elements) => elements.map((i) => i.href))
+      .evaluateAll((elements) =>
+        (elements as Array<{ href: string }>).map((i) => i.href)
+      )
     const idUrlPairs: Array<[string, string]> = links.map((s) => [
       getImageId(s),
       s
@@ -163,7 +165,7 @@ export class SubstackExtractor extends Extractor {
     return []
   }
 
-  async loadMore(page: Page): Promise<boolean> {
+  async loadMore(page: ScraperPage): Promise<boolean> {
     console.log('Loading more pages')
     await oraPromise(
       humanLikeScrollToBottom(page),

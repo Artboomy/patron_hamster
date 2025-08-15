@@ -68,6 +68,14 @@ Add `--update` flag. It will stop fetching if processed posts are encountered.
 yarn run launch --recover --update --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
 ```
 
+### V2 bridge mode (opt-in)
+
+Add `--v2` to enable the extension bridge integration path while keeping the same `launch` command.
+
+```shell
+yarn run launch --recover --v2 --url https://www.patreon.com/c/<creator name>/posts --year <year> --dir output/<creator name>
+```
+
 ## Generate html gallery (executed automatically in any launch command)
 
 Example:

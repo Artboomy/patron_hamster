@@ -9,3 +9,7 @@ output
 TODO
 custom-cache
 flags.json
+mcp.json
+.plans
+.cache
+test-results

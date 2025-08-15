@@ -2,10 +2,18 @@ import globals from 'globals'
 import pluginJs from '@eslint/js'
 import tseslint from 'typescript-eslint'
 
+const TARGET_FILES = [
+  'src/**/*.{js,mjs,cjs,ts,tsx}',
+  'chrome-extension/**/*.{js,mjs,cjs,ts,tsx}'
+]
+
 /** @type {import('eslint').Linter.Config[]} */
 export default [
   {
-    files: ['**/*.{js,mjs,cjs,ts}'],
+    ignores: ['**/node_modules/**']
+  },
+  {
+    files: TARGET_FILES,
     rules: {
       'no-shadow': 'error',
       '@typescript-eslint/ban-ts-comment': [
@@ -25,7 +33,10 @@ export default [
       ]
     }
   },
-  { languageOptions: { globals: globals.browser } },
-  pluginJs.configs.recommended,
-  ...tseslint.configs.recommended
+  { files: TARGET_FILES, languageOptions: { globals: globals.browser } },
+  { ...pluginJs.configs.recommended, files: TARGET_FILES },
+  ...tseslint.configs.recommended.map((config) => ({
+    ...config,
+    files: TARGET_FILES
+  }))
 ]

@@ -1,5 +1,5 @@
 import { Extractor } from '../extractor.js'
-import { Page } from 'rebrowser-playwright'
+import type { ScraperPage } from './pageTypes.js'
 import { downloadFile, linkToBuffer } from './utils.js'
 import ora from 'ora'
 
@@ -36,7 +36,7 @@ export class FanboxExtractor extends Extractor {
     // pass
   }
 
-  async getTags(page: Page): Promise<string[]> {
+  async getTags(page: ScraperPage): Promise<string[]> {
     await this.cloudflareGuard(page, 'getTags', page)
     const text = page.locator(this.selectors.tags)
     if ((await text.count()) === 0) {
@@ -46,7 +46,7 @@ export class FanboxExtractor extends Extractor {
     return (await text.innerText({ timeout: 300 })).split('\n')
   }
 
-  async getPostDate(page: Page): Promise<Date> {
+  async getPostDate(page: ScraperPage): Promise<Date> {
     await this.cloudflareGuard(page, 'getPostDate', page)
     const dateStr = await page.locator(this.selectors.date).innerText()
     if (!dateStr) {
@@ -60,13 +60,13 @@ export class FanboxExtractor extends Extractor {
     }
   }
 
-  getContentBlock(page: Page) {
+  getContentBlock(page: ScraperPage) {
     return page.locator(
       `${this.selectors.contentBlock}, ${this.selectors.richContentBlock}`
     )
   }
 
-  async getPageName(page: Page): Promise<string> {
+  async getPageName(page: ScraperPage): Promise<string> {
     return await page.evaluate(
       () =>
         // @ts-ignore this is browser context
@@ -75,7 +75,7 @@ export class FanboxExtractor extends Extractor {
   }
 
   async saveImageOnlyPost(cfg: {
-    page: Page
+    page: ScraperPage
     outDir: string
     timestamp: Date
     tags: string[]
@@ -85,7 +85,9 @@ export class FanboxExtractor extends Extractor {
     await this.cloudflareGuard(page, 'saveImageOnlyPost', cfg)
     const links: string[] = await page
       .locator(this.selectors.imageAnchor)
-      .evaluateAll((elements) => elements.map((i) => i.href))
+      .evaluateAll((elements) =>
+        (elements as Array<{ href: string }>).map((i) => i.href)
+      )
     const imageIdToName: Record<string, string> = {}
     const idUrlPairs: Array<[string, string]> = links
       .map((s) => [s.split('/').at(-1)?.split('.')[0], s])
@@ -116,7 +118,7 @@ export class FanboxExtractor extends Extractor {
     return imageIdToName
   }
 
-  getLoadMoreButton(page: Page) {
+  getLoadMoreButton(page: ScraperPage) {
     return page.locator(this.selectors.nextPage).first()
   }
 

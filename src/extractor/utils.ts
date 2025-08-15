@@ -3,9 +3,14 @@ import fs from 'node:fs'
 import fetch from 'node-fetch'
 import path from 'path'
 import { exiftool } from 'exiftool-vendored'
-import { Page } from 'rebrowser-playwright'
+import type { ScraperPage } from './pageTypes.js'
 import { imageExtensions } from '../constants.js'
 import { waitForDelay } from '../utils.js'
+
+const BRIDGE_PORT = Number(process.env.BRIDGE_PORT || 17353)
+const BRIDGE_HOST = process.env.BRIDGE_HOST || '127.0.0.1'
+const BRIDGE_BASE_URL =
+  process.env.BRIDGE_BASE_URL || `http://${BRIDGE_HOST}:${BRIDGE_PORT}`
 
 const hasExtension = (str: string): boolean => {
   const parts = str.split('.')
@@ -14,6 +19,13 @@ const hasExtension = (str: string): boolean => {
   }
   const last = parts.at(-1)
   return Boolean(last && imageExtensions.includes(last.toLowerCase()))
+}
+
+export function resolveOutputFilePath(
+  outputPath: string,
+  fileName: string
+): string {
+  return path.resolve(outputPath, path.basename(fileName))
 }
 
 export async function downloadFile(
@@ -34,20 +46,22 @@ export async function downloadFile(
     (i) => i || { ext: 'file', mime: 'unknown' }
   )
   const fileName = hasExtension(name) ? name : `${name}.${ext}`
-  const filePath = path.resolve(outputPath, fileName)
+  const safeFileName = path.basename(fileName)
+  const filePath = resolveOutputFilePath(outputPath, safeFileName)
   await saveBufferToDisk({
     buffer: resultBuffer,
     filePath,
     timestamp,
     tags,
-    isImage: mime.includes('image')
+    isImage: mime.includes('image'),
+    mimeType: mime
   })
-  // console.log(`♥ Saved file ${fileName} to ${filePath}`)
-  return fileName
+  console.log(`♥ Saved file ${fileName} to ${filePath}`)
+  return safeFileName
 }
 
 export async function linkToBuffer(
-  page: Page,
+  page: ScraperPage,
   fileUrl: string,
   maxRetries = 5
 ): Promise<Buffer> {
@@ -86,15 +100,20 @@ export async function saveBufferToDisk({
   filePath,
   timestamp,
   tags,
-  isImage
+  isImage,
+  mimeType
 }: {
   buffer: Buffer
   timestamp: Date | null
   filePath: string
   tags: string[]
   isImage: boolean
+  mimeType?: string
 }) {
   fs.writeFileSync(filePath, buffer)
+  if (isImage && (mimeType || '').startsWith('image/')) {
+    void publishSavedImage(buffer, mimeType as string, path.basename(filePath))
+  }
   if (tags.length && isImage) {
     // console.log('✍ Writing tags')
     await addMetadata(filePath, tags)
@@ -106,6 +125,26 @@ export async function saveBufferToDisk({
     } catch (e) {
       console.log('Failed to set file time', e)
     }
+  }
+}
+
+async function publishSavedImage(
+  buffer: Buffer,
+  mimeType: string,
+  fileName: string
+): Promise<void> {
+  try {
+    await fetch(`${BRIDGE_BASE_URL}/v2/recent-images/saved`, {
+      method: 'POST',
+      headers: {
+        'content-type': mimeType,
+        'x-image-action': 'saved-to-output',
+        'x-image-request-id': fileName
+      },
+      body: buffer
+    })
+  } catch {
+    // Local bridge may be unavailable in non-v2 runs; ignore.
   }
 }
 

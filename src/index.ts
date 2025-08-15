@@ -2,6 +2,7 @@ import { chromium } from 'rebrowser-playwright'
 import { Cookie } from 'rebrowser-playwright'
 import * as fs from 'fs'
 import minimist from 'minimist'
+import type { ParsedArgs } from 'minimist'
 import { waitForDelay, waitForEnter } from './utils.js'
 import { Extractor } from './extractor.js'
 import path from 'path'
@@ -14,6 +15,14 @@ const cacheDir = path.resolve('./playwright-cache')
 import { exec } from 'child_process'
 import { clearInterval } from 'node:timers'
 import { SubstackExtractor } from './extractor/substack.js'
+import { BridgeV2Runtime } from './bridgeV2.js'
+import { BridgeContextShim } from './bridgePageShim.js'
+import type { ScraperContext, ScraperPage } from './extractor/pageTypes.js'
+import {
+  startLocalBridgeServer,
+  stopLocalBridgeServer
+} from './local-bridge/server.js'
+import { BridgeActionError } from './bridgeV2.js'
 function readCookies(): Cookie[] {
   try {
     return JSON.parse(fs.readFileSync(fileName, 'utf8'))
@@ -39,7 +48,14 @@ async function runTocHtml(dirPath: string) {
 }
 
 function prepareDir(dirName: string) {
+  const { update } = minimist(process.argv.slice(2))
   if (!fs.existsSync(dirName)) {
+    if (update) {
+      const e = Error('Update should be running only with existing dir')
+      // @ts-ignore nonrecovery errors
+      e.recoverable = false
+      throw e
+    }
     fs.mkdirSync(dirName)
     console.log(`Created output directory ${dirName}`)
   } else {
@@ -50,9 +66,93 @@ function prepareDir(dirName: string) {
 let isFinished = false
 let cacheId: NodeJS.Timeout | null = null
 let pageUrl: string = ''
+
+function resolveSite(url: string): 'patreon' | 'pixivFanbox' | 'substack' {
+  if (url.includes('patreon')) {
+    return 'patreon'
+  }
+  if (url.includes('fanbox')) {
+    return 'pixivFanbox'
+  }
+  if (url.includes('substack')) {
+    return 'substack'
+  }
+  throw Error('Unsupported url')
+}
+
+function createExtractor(
+  site: 'patreon' | 'pixivFanbox' | 'substack',
+  page: ScraperPage,
+  context: ScraperContext
+) {
+  if (site === 'patreon') {
+    return new Extractor(page, context)
+  }
+  if (site === 'pixivFanbox') {
+    return new FanboxExtractor(page, context)
+  }
+  if (site === 'substack') {
+    return new SubstackExtractor(page, context)
+  }
+  throw Error('Unsupported url')
+}
+
+async function runV2(args: ParsedArgs): Promise<void> {
+  const { url, year } = args
+  const site = resolveSite(String(url))
+  const bridgeV2 = new BridgeV2Runtime()
+  let extractor: Extractor | FanboxExtractor | SubstackExtractor | null = null
+  try {
+    await oraPromise(startLocalBridgeServer(), 'Starting in-process v2 bridge')
+    await oraPromise(bridgeV2.ensureReady(), 'Connecting to in-process v2 bridge')
+    await oraPromise(bridgeV2.ping(), 'Pinging v2 local bridge')
+    const context = new BridgeContextShim(bridgeV2)
+    context.setDefaultTimeout(50_000)
+    const page = await context.newPage()
+    extractor = createExtractor(site, page, context)
+    await oraPromise(
+      extractor.doLogin([], { skipCookies: true }),
+      'Waiting for login'
+    )
+    if (pageUrl) {
+      console.log(`⏯  Continuing from ${pageUrl}`)
+    }
+    const finalDir = await extractor.extract(pageUrl || String(url), String(year))
+    await oraPromise(runTocHtml(finalDir), 'Generating html gallery...')
+    if (extractor.lockedCount) {
+      console.log(`${extractor.lockedCount} locked posts were not downloaded`)
+    }
+    console.log('💯 Extractor finished.')
+    await context.close()
+  } catch (e) {
+    if (e instanceof BridgeActionError) {
+      console.error('V2 bridge action failed:', e.message)
+    }
+    if (extractor) {
+      pageUrl = extractor.pageUrl
+      if (extractor.lockedCount) {
+        console.log(`There were ${extractor.lockedCount} locked posts up to now`)
+      }
+    }
+    throw e
+  } finally {
+    await bridgeV2.dispose()
+    await stopLocalBridgeServer()
+  }
+}
+
 export async function main() {
   const args = minimist(process.argv.slice(2))
-  const { server, username, password, dir, url, year } = args
+  const { server, username, password, dir, url, year, v2 } = args
+  const useV2 = Boolean(v2)
+  if (useV2) {
+    if (!url) {
+      console.error('No url provided')
+      return
+    }
+    prepareDir(dir)
+    return runV2(args)
+  }
   if (!url) {
     console.error('No url provided')
     return
@@ -65,9 +165,14 @@ export async function main() {
   prepareDir(dir)
   console.log('Launching Chrome browser')
   const preparedCookies = readCookies()
-  const extensionPath = path.resolve('./extensions/adblock')
-  const existsAndNotEmpty =
-    fs.existsSync(extensionPath) && fs.readdirSync(extensionPath).length > 0
+  const extensionPaths: string[] = []
+  const adblockExtensionPath = path.resolve('./extensions/adblock')
+  const hasAdblockExtension =
+    fs.existsSync(adblockExtensionPath) &&
+    fs.readdirSync(adblockExtensionPath).length > 0
+  if (hasAdblockExtension) {
+    extensionPaths.push(adblockExtensionPath)
+  }
   const cfg: Parameters<(typeof chromium)['launchPersistentContext']>[1] = {
     headless: false,
     // @see https://github.com/ultrafunkamsterdam/undetected-chromedriver/issues/1388#issuecomment-1631477896
@@ -82,11 +187,12 @@ export async function main() {
     viewport: null,
     channel: 'chrome'
   }
-  if (existsAndNotEmpty) {
+  if (extensionPaths.length > 0) {
+    const csv = extensionPaths.join(',')
     cfg.args = [
       ...(cfg.args || []),
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`
+      `--disable-extensions-except=${csv}`,
+      `--load-extension=${csv}`
     ]
   }
   if (server && username) {
@@ -97,35 +203,19 @@ export async function main() {
     }
   }
   const context = await chromium.launchPersistentContext(cacheDir, cfg)
-  let site: 'patreon' | 'pixivFanbox' | 'substack'
-  if (url.includes('patreon')) {
-    site = 'patreon'
-  } else if (url.includes('fanbox')) {
-    site = 'pixivFanbox'
-  } else if (url.includes('substack')) {
-    site = 'substack'
-  } else {
-    console.warn('Unrecognized site')
-    process.exit(0)
-  }
+  const site = resolveSite(String(url))
   cacheId = await runCache(context, site)
   context.setDefaultTimeout(50_000)
 
   const page = await context.newPage()
-
-  let extractor
-  if (site === 'patreon') {
-    extractor = new Extractor(page, context)
-  } else if (site === 'pixivFanbox') {
-    extractor = new FanboxExtractor(page, context)
-  } else if (site === 'substack') {
-    extractor = new SubstackExtractor(page, context)
-  } else {
-    throw Error('Unsupported url')
-  }
+  const extractor = createExtractor(
+    site,
+    page as unknown as ScraperPage,
+    context as unknown as ScraperContext
+  )
   await oraPromise(extractor.doLogin(preparedCookies), 'Loading cookies')
 
-  await saveCookies(context)
+  await saveCookies(context as unknown as ScraperContext)
 
   try {
     if (pageUrl) {
@@ -145,11 +235,12 @@ export async function main() {
     console.log(`${extractor.lockedCount} locked posts were not downloaded`)
   }
   console.log('💯 Extractor finished. Press Enter to close the browser.')
-  await saveCookies(context)
+  await saveCookies(context as unknown as ScraperContext)
   isFinished = true
   waitForEnter().then(() => {
-    context.close()
-    process.exit()
+    context.close().finally(() => {
+      process.exit()
+    })
   })
 }
 let repeats = 50
@@ -159,12 +250,18 @@ if (args.recover) {
   while (repeats > 0) {
     try {
       await main()
+      break
     } catch (e) {
       if (cacheId) {
         clearInterval(cacheId)
       }
       if (isFinished) {
         process.exit()
+      }
+      // @ts-ignore nonrecovery errors
+      if (e.recoverable === false) {
+        console.log('Nonrecoverable error', e)
+        process.exit(1)
       }
       console.log('🔃  Failure, restarting', e)
       repeats -= 1

@@ -1,0 +1,989 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://spec.openapis.org/oas/3.1/dialect/base",
+  "info": {
+    "title": "Patreon Extractor Native Host Messaging Contract",
+    "version": "1.0.0",
+    "description": "Contract for Chrome Extension V2 <-> native host messaging. Transport is Chrome Native Messaging; this OpenAPI file defines JSON message envelopes, action payloads/results, and error taxonomy."
+  },
+  "servers": [
+    {
+      "url": "native://com.patreon_extractor.bridge",
+      "description": "Chrome Native Messaging host"
+    }
+  ],
+  "paths": {
+    "/v1/message": {
+      "post": {
+        "operationId": "sendNativeMessage",
+        "summary": "Send one native bridge command",
+        "description": "Represents one Native Messaging request/response exchange. Extension sends one JSON message and expects one JSON response with matching requestId.",
+        "x-transport": "chrome.nativeMessaging",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeRequestEnvelope"
+              },
+              "examples": {
+                "navigate": {
+                  "value": {
+                    "version": "1.0",
+                    "requestId": "req_01JYFQ0XQ7",
+                    "action": "navigate",
+                    "payload": {
+                      "tabId": 123,
+                      "url": "https://www.patreon.com/c/example/posts",
+                      "waitUntil": "domcontentloaded"
+                    },
+                    "timeoutMs": 30000,
+                    "sentAt": "2026-03-07T10:00:00.000Z"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command processed by native host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeResponseEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Version": {
+        "type": "string",
+        "pattern": "^[0-9]+\\.[0-9]+$",
+        "examples": [
+          "1.0"
+        ]
+      },
+      "RequestId": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._:-]+$"
+      },
+      "Action": {
+        "type": "string",
+        "enum": [
+          "ping",
+          "openTab",
+          "navigate",
+          "getUrl",
+          "evaluate",
+          "waitForSelector",
+          "count",
+          "click",
+          "hover",
+          "innerText",
+          "scrollBy",
+          "sleep",
+          "listTabs",
+          "activateTab"
+        ]
+      },
+      "NativeRequestEnvelope": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "$ref": "#/components/schemas/Version"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "payload": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PingPayload"
+              },
+              {
+                "$ref": "#/components/schemas/OpenTabPayload"
+              },
+              {
+                "$ref": "#/components/schemas/NavigatePayload"
+              },
+              {
+                "$ref": "#/components/schemas/GetUrlPayload"
+              },
+              {
+                "$ref": "#/components/schemas/EvaluatePayload"
+              },
+              {
+                "$ref": "#/components/schemas/WaitForSelectorPayload"
+              },
+              {
+                "$ref": "#/components/schemas/CountPayload"
+              },
+              {
+                "$ref": "#/components/schemas/ClickPayload"
+              },
+              {
+                "$ref": "#/components/schemas/HoverPayload"
+              },
+              {
+                "$ref": "#/components/schemas/InnerTextPayload"
+              },
+              {
+                "$ref": "#/components/schemas/ScrollByPayload"
+              },
+              {
+                "$ref": "#/components/schemas/SleepPayload"
+              },
+              {
+                "$ref": "#/components/schemas/ListTabsPayload"
+              },
+              {
+                "$ref": "#/components/schemas/ActivateTabPayload"
+              }
+            ],
+            "description": "Payload schema is selected by action; see x-actionContracts for exact mapping."
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600000
+          },
+          "sentAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "version",
+          "requestId",
+          "action",
+          "payload",
+          "timeoutMs",
+          "sentAt"
+        ],
+        "additionalProperties": false
+      },
+      "NativeError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "BAD_REQUEST",
+              "UNSUPPORTED_ACTION",
+              "NOT_IMPLEMENTED",
+              "TAB_NOT_FOUND",
+              "SELECTOR_NOT_FOUND",
+              "EVALUATION_ERROR",
+              "TIMEOUT",
+              "PERMISSION_DENIED",
+              "NATIVE_HOST_UNAVAILABLE",
+              "INTERNAL_ERROR"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "additionalProperties": false
+      },
+      "NativeResponseEnvelope": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "$ref": "#/components/schemas/Version"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PingResult"
+              },
+              {
+                "$ref": "#/components/schemas/OpenTabResult"
+              },
+              {
+                "$ref": "#/components/schemas/NavigateResult"
+              },
+              {
+                "$ref": "#/components/schemas/GetUrlResult"
+              },
+              {
+                "$ref": "#/components/schemas/EvaluateResult"
+              },
+              {
+                "$ref": "#/components/schemas/WaitForSelectorResult"
+              },
+              {
+                "$ref": "#/components/schemas/CountResult"
+              },
+              {
+                "$ref": "#/components/schemas/ClickResult"
+              },
+              {
+                "$ref": "#/components/schemas/HoverResult"
+              },
+              {
+                "$ref": "#/components/schemas/InnerTextResult"
+              },
+              {
+                "$ref": "#/components/schemas/ScrollByResult"
+              },
+              {
+                "$ref": "#/components/schemas/SleepResult"
+              },
+              {
+                "$ref": "#/components/schemas/ListTabsResult"
+              },
+              {
+                "$ref": "#/components/schemas/ActivateTabResult"
+              }
+            ],
+            "description": "Result schema is selected by action of the correlated requestId; see x-actionContracts."
+          },
+          "error": {
+            "$ref": "#/components/schemas/NativeError"
+          },
+          "receivedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "version",
+          "requestId",
+          "ok",
+          "receivedAt",
+          "durationMs"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          {
+            "properties": {
+              "ok": {
+                "const": false
+              }
+            },
+            "required": [
+              "error"
+            ]
+          }
+        ]
+      },
+      "PingPayload": {
+        "type": "object",
+        "properties": {
+          "echo": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        },
+        "additionalProperties": false
+      },
+      "PingResult": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok"
+          },
+          "hostName": {
+            "type": "string"
+          },
+          "echo": {
+            "type": "string"
+          },
+          "now": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "status",
+          "hostName",
+          "now"
+        ],
+        "additionalProperties": false
+      },
+      "OpenTabPayload": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "active": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "OpenTabResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tabId",
+          "url",
+          "active"
+        ],
+        "additionalProperties": false
+      },
+      "NavigatePayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "waitUntil": {
+            "type": "string",
+            "enum": [
+              "domcontentloaded",
+              "load",
+              "networkidle"
+            ],
+            "default": "domcontentloaded"
+          }
+        },
+        "required": [
+          "tabId",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "NavigateResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string"
+          },
+          "finalUrl": {
+            "type": "string"
+          },
+          "navigatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "tabId",
+          "url",
+          "finalUrl",
+          "navigatedAt"
+        ],
+        "additionalProperties": false
+      },
+      "GetUrlPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "GetUrlResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tabId",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "EvaluatePayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expression": {
+            "type": "string",
+            "minLength": 1
+          },
+          "args": {
+            "type": "array",
+            "items": {}
+          },
+          "returnByValue": {
+            "type": "boolean",
+            "default": true
+          },
+          "executionWorld": {
+            "type": "string",
+            "enum": [
+              "ISOLATED",
+              "MAIN"
+            ],
+            "default": "ISOLATED"
+          }
+        },
+        "required": [
+          "tabId",
+          "expression"
+        ],
+        "additionalProperties": false
+      },
+      "EvaluateResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "value": {},
+          "valueType": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tabId",
+          "value"
+        ],
+        "additionalProperties": false
+      },
+      "WaitForSelectorPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "attached",
+              "detached",
+              "visible",
+              "hidden"
+            ],
+            "default": "attached"
+          },
+          "pollIntervalMs": {
+            "type": "integer",
+            "minimum": 50,
+            "maximum": 5000,
+            "default": 200
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "WaitForSelectorResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "matched": {
+            "type": "boolean"
+          },
+          "elapsedMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "tabId",
+          "selector",
+          "state",
+          "matched",
+          "elapsedMs"
+        ],
+        "additionalProperties": false
+      },
+      "CountPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "CountResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "tabId",
+          "selector",
+          "count"
+        ],
+        "additionalProperties": false
+      },
+      "ClickPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string",
+            "minLength": 1
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "ClickResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string"
+          },
+          "clicked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector",
+          "clicked"
+        ],
+        "additionalProperties": false
+      },
+      "HoverPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string",
+            "minLength": 1
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "HoverResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string"
+          },
+          "hovered": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector",
+          "hovered"
+        ],
+        "additionalProperties": false
+      },
+      "InnerTextPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string",
+            "minLength": 1
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          }
+        },
+        "required": [
+          "tabId",
+          "selector"
+        ],
+        "additionalProperties": false
+      },
+      "InnerTextResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tabId",
+          "selector",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "ScrollByPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "x": {
+            "type": "number",
+            "default": 0
+          },
+          "y": {
+            "type": "number"
+          },
+          "behavior": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "smooth"
+            ],
+            "default": "auto"
+          }
+        },
+        "required": [
+          "tabId",
+          "y"
+        ],
+        "additionalProperties": false
+      },
+      "ScrollByResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "scrollX": {
+            "type": "number"
+          },
+          "scrollY": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "tabId",
+          "x",
+          "y",
+          "scrollX",
+          "scrollY"
+        ],
+        "additionalProperties": false
+      },
+      "SleepPayload": {
+        "type": "object",
+        "properties": {
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 600000
+          }
+        },
+        "required": [
+          "durationMs"
+        ],
+        "additionalProperties": false
+      },
+      "SleepResult": {
+        "type": "object",
+        "properties": {
+          "sleptMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "sleptMs"
+        ],
+        "additionalProperties": false
+      },
+      "ListTabsPayload": {
+        "type": "object",
+        "properties": {
+          "windowId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "includeDiscarded": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "ListTabsResult": {
+        "type": "object",
+        "properties": {
+          "tabs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tabId": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "windowId": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "url": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "active": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "tabId",
+                "windowId",
+                "url",
+                "active"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "tabs"
+        ],
+        "additionalProperties": false
+      },
+      "ActivateTabPayload": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "tabId"
+        ],
+        "additionalProperties": false
+      },
+      "ActivateTabResult": {
+        "type": "object",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "active": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tabId",
+          "active"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "x-actionContracts": {
+      "ping": {
+        "payloadSchema": "#/components/schemas/PingPayload",
+        "resultSchema": "#/components/schemas/PingResult"
+      },
+      "openTab": {
+        "payloadSchema": "#/components/schemas/OpenTabPayload",
+        "resultSchema": "#/components/schemas/OpenTabResult"
+      },
+      "navigate": {
+        "payloadSchema": "#/components/schemas/NavigatePayload",
+        "resultSchema": "#/components/schemas/NavigateResult"
+      },
+      "getUrl": {
+        "payloadSchema": "#/components/schemas/GetUrlPayload",
+        "resultSchema": "#/components/schemas/GetUrlResult"
+      },
+      "evaluate": {
+        "payloadSchema": "#/components/schemas/EvaluatePayload",
+        "resultSchema": "#/components/schemas/EvaluateResult"
+      },
+      "waitForSelector": {
+        "payloadSchema": "#/components/schemas/WaitForSelectorPayload",
+        "resultSchema": "#/components/schemas/WaitForSelectorResult"
+      },
+      "count": {
+        "payloadSchema": "#/components/schemas/CountPayload",
+        "resultSchema": "#/components/schemas/CountResult"
+      },
+      "click": {
+        "payloadSchema": "#/components/schemas/ClickPayload",
+        "resultSchema": "#/components/schemas/ClickResult"
+      },
+      "hover": {
+        "payloadSchema": "#/components/schemas/HoverPayload",
+        "resultSchema": "#/components/schemas/HoverResult"
+      },
+      "innerText": {
+        "payloadSchema": "#/components/schemas/InnerTextPayload",
+        "resultSchema": "#/components/schemas/InnerTextResult"
+      },
+      "scrollBy": {
+        "payloadSchema": "#/components/schemas/ScrollByPayload",
+        "resultSchema": "#/components/schemas/ScrollByResult"
+      },
+      "sleep": {
+        "payloadSchema": "#/components/schemas/SleepPayload",
+        "resultSchema": "#/components/schemas/SleepResult"
+      },
+      "listTabs": {
+        "payloadSchema": "#/components/schemas/ListTabsPayload",
+        "resultSchema": "#/components/schemas/ListTabsResult"
+      },
+      "activateTab": {
+        "payloadSchema": "#/components/schemas/ActivateTabPayload",
+        "resultSchema": "#/components/schemas/ActivateTabResult"
+      }
+    }
+  }
+}
