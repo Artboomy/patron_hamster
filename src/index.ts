@@ -14,6 +14,7 @@ const cacheDir = path.resolve('./playwright-cache')
 
 import { exec } from 'child_process'
 import { clearInterval } from 'node:timers'
+import { pathToFileURL } from 'node:url'
 import { SubstackExtractor } from './extractor/substack.js'
 import { BridgeV2Runtime } from './bridgeV2.js'
 import { BridgeContextShim } from './bridgePageShim.js'
@@ -29,6 +30,49 @@ function readCookies(): Cookie[] {
   } catch (_e) {
     return []
   }
+}
+type LaunchArgs = ParsedArgs & {
+  dir?: string
+  patreon?: string
+  recover?: boolean
+  trace?: boolean
+  update?: boolean
+  url?: string
+  v1?: boolean
+  year?: string | number
+}
+
+export function resolveLaunchArgs(rawArgs: ParsedArgs): LaunchArgs {
+  const args: LaunchArgs = { ...rawArgs }
+  if (args.patreon !== undefined) {
+    if (args.url) {
+      throw new Error('Use either --url or --patreon, not both')
+    }
+    if (typeof args.patreon !== 'string') {
+      throw new Error('No Patreon creator provided')
+    }
+    const creator = args.patreon.trim().replace(/^\/+|\/+$/g, '')
+    if (!creator) {
+      throw new Error('No Patreon creator provided')
+    }
+    if (creator.includes('/') || creator.includes('\\')) {
+      throw new Error('Patreon creator must be a creator name, not a path or URL')
+    }
+    args.url = `https://www.patreon.com/c/${encodeURIComponent(creator)}/posts`
+    args.dir ??= path.join('output', creator)
+  }
+  if (!args.url) {
+    throw new Error('No url provided')
+  }
+  if (!args.dir) {
+    throw new Error('No dir provided')
+  }
+  return args
+}
+
+export type ExtractorCliOptions = {
+  outDir: string
+  updateMode: boolean
 }
 
 async function runTocHtml(dirPath: string) {
@@ -47,20 +91,19 @@ async function runTocHtml(dirPath: string) {
   })
 }
 
-function prepareDir(dirName: string) {
-  const { update } = minimist(process.argv.slice(2))
+function prepareDir(dirName: string, updateMode: boolean) {
   if (!fs.existsSync(dirName)) {
-    if (update) {
+    if (updateMode) {
       const e = Error('Update should be running only with existing dir')
       // @ts-ignore nonrecovery errors
       e.recoverable = false
       throw e
     }
-    fs.mkdirSync(dirName)
+    fs.mkdirSync(dirName, { recursive: true })
     console.log(`Created output directory ${dirName}`)
-  } else {
-    console.log(`Directory ${dirName} already exists`)
+    return
   }
+  console.log(`Directory ${dirName} already exists`)
 }
 
 let isFinished = false
@@ -83,25 +126,31 @@ function resolveSite(url: string): 'patreon' | 'pixivFanbox' | 'substack' {
 function createExtractor(
   site: 'patreon' | 'pixivFanbox' | 'substack',
   page: ScraperPage,
-  context: ScraperContext
+  context: ScraperContext,
+  options: ExtractorCliOptions
 ) {
   if (site === 'patreon') {
-    return new Extractor(page, context)
+    return new Extractor(page, context, options)
   }
   if (site === 'pixivFanbox') {
-    return new FanboxExtractor(page, context)
+    return new FanboxExtractor(page, context, options)
   }
   if (site === 'substack') {
-    return new SubstackExtractor(page, context)
+    return new SubstackExtractor(page, context, options)
   }
   throw Error('Unsupported url')
 }
 
-async function runV2(args: ParsedArgs): Promise<void> {
-  const { url, year } = args
+async function runV2(args: LaunchArgs): Promise<void> {
+  const { url, year, trace } = args
   const site = resolveSite(String(url))
-  const bridgeV2 = new BridgeV2Runtime()
+  const traceFilePath = trace ? path.resolve(String(args.dir), 'bridge.trace') : ''
+  const bridgeV2 = new BridgeV2Runtime({ traceFilePath })
   let extractor: Extractor | FanboxExtractor | SubstackExtractor | null = null
+  if (traceFilePath) {
+    fs.writeFileSync(traceFilePath, '', 'utf8')
+    console.log(`Writing bridge trace to ${traceFilePath}`)
+  }
   try {
     await oraPromise(startLocalBridgeServer(), 'Starting in-process v2 bridge')
     await oraPromise(bridgeV2.ensureReady(), 'Connecting to in-process v2 bridge')
@@ -109,9 +158,12 @@ async function runV2(args: ParsedArgs): Promise<void> {
     const context = new BridgeContextShim(bridgeV2)
     context.setDefaultTimeout(50_000)
     const page = await context.newPage()
-    extractor = createExtractor(site, page, context)
+    extractor = createExtractor(site, page, context, {
+      outDir: String(args.dir),
+      updateMode: Boolean(args.update)
+    })
     await oraPromise(
-      extractor.doLogin([], { skipCookies: true }),
+      extractor.doLogin([], { skipCookies: true, targetUrl: String(url) }),
       'Waiting for login'
     )
     if (pageUrl) {
@@ -141,16 +193,10 @@ async function runV2(args: ParsedArgs): Promise<void> {
   }
 }
 
-export async function main() {
-  const args = minimist(process.argv.slice(2))
-  const { server, username, password, dir, url, year, v2 } = args
-  const useV2 = Boolean(v2)
-  if (useV2) {
-    if (!url) {
-      console.error('No url provided')
-      return
-    }
-    prepareDir(dir)
+export async function main(args: LaunchArgs) {
+  const { server, username, password, dir, url, year, v1, update } = args
+  if (!v1) {
+    prepareDir(String(dir), Boolean(update))
     return runV2(args)
   }
   if (!url) {
@@ -162,7 +208,7 @@ export async function main() {
       `Provided proxy config: ${server}, user=${username}, password=<MASKED>`
     )
   }
-  prepareDir(dir)
+  prepareDir(String(dir), Boolean(update))
   console.log('Launching Chrome browser')
   const preparedCookies = readCookies()
   const extensionPaths: string[] = []
@@ -211,7 +257,11 @@ export async function main() {
   const extractor = createExtractor(
     site,
     page as unknown as ScraperPage,
-    context as unknown as ScraperContext
+    context as unknown as ScraperContext,
+    {
+      outDir: String(dir),
+      updateMode: Boolean(update)
+    }
   )
   await oraPromise(extractor.doLogin(preparedCookies), 'Loading cookies')
 
@@ -244,30 +294,31 @@ export async function main() {
   })
 }
 let repeats = 50
-const args = minimist(process.argv.slice(2))
-if (args.recover) {
-  console.log('Running in auto-recover mode. Press Ctrl+C at any time to close')
-  while (repeats > 0) {
-    try {
-      await main()
-      break
-    } catch (e) {
-      if (cacheId) {
-        clearInterval(cacheId)
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const args = resolveLaunchArgs(minimist(process.argv.slice(2)))
+  if (args.recover === false) {
+    await main(args)
+  } else {
+    console.log('Running in auto-recover mode. Press Ctrl+C at any time to close')
+    while (repeats > 0) {
+      try {
+        await main(args)
+        break
+      } catch (e) {
+        clearInterval(cacheId ?? undefined)
+        if (isFinished) {
+          process.exit()
+        }
+        // @ts-ignore nonrecovery errors
+        if (e.recoverable === false) {
+          console.log('Nonrecoverable error', e)
+          process.exit(1)
+        }
+        console.log('🔃  Failure, restarting', e)
+        repeats -= 1
+        await waitForDelay(1000)
       }
-      if (isFinished) {
-        process.exit()
-      }
-      // @ts-ignore nonrecovery errors
-      if (e.recoverable === false) {
-        console.log('Nonrecoverable error', e)
-        process.exit(1)
-      }
-      console.log('🔃  Failure, restarting', e)
-      repeats -= 1
-      await waitForDelay(1000)
     }
   }
-} else {
-  main()
 }

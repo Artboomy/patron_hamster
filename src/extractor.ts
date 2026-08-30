@@ -14,7 +14,7 @@ import {
 } from './utils.js'
 import fs from 'node:fs'
 import path from 'path'
-import minimist from 'minimist'
+import type { ExtractorCliOptions } from './index.js'
 import TurndownService from 'turndown'
 import { StoredCookies } from './extractor/types.js'
 import {
@@ -167,15 +167,18 @@ export class Extractor {
   }
   checker: (id: string) => string | null
 
-  constructor(page: ScraperPage, context: ScraperContext) {
+  constructor(
+    page: ScraperPage,
+    context: ScraperContext,
+    options: ExtractorCliOptions
+  ) {
     this.context = context
     this.page = page
     this.visited = new Set()
     this.years = []
     this.turndownService = new TurndownService()
-    const args = minimist(process.argv.slice(2))
-    this.outDir = args.dir
-    this.updateMode = args.update
+    this.outDir = options.outDir
+    this.updateMode = options.updateMode
     this.checker = getFileChecker(this.outDir)
     this.loadVisited()
   }
@@ -819,17 +822,22 @@ ${content}
     cookies: StoredCookies,
     options?: {
       skipCookies?: boolean
+      targetUrl?: string
     }
   ) {
     const flags = this.getFlags()
     const skipCookies = Boolean(options?.skipCookies)
+    const targetUrl =
+      typeof options?.targetUrl === 'string' && options.targetUrl
+        ? options.targetUrl
+        : ''
     if (this.isLoggedIn(flags)) {
       if (skipCookies) {
         return
       }
       return this.context.addCookies(cookies)
     }
-    await this.page.goto(URLS[this.site].login)
+    await this.page.goto(targetUrl || URLS[this.site].login)
     console.log('🔑 Please login and press Enter')
     await waitForEnter()
     fs.writeFileSync(
@@ -837,6 +845,9 @@ ${content}
       JSON.stringify({ ...flags, [this.site]: true }),
       'utf8'
     )
+    if (targetUrl) {
+      await this.page.goto(targetUrl)
+    }
     if (skipCookies) {
       return
     }

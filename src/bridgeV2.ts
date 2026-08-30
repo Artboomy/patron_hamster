@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+
 const BRIDGE_HOST = process.env.BRIDGE_HOST || '127.0.0.1'
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT || 17353)
 const BRIDGE_BASE_URL =
@@ -106,6 +108,15 @@ export class BridgeV2Runtime {
   private activeTabId: number | null = null
   private expectedTabUrls = new Map<number, string>()
   private tabIdAliases = new Map<number, number>()
+  private readonly traceFilePath: string | null
+  constructor(options?: { traceFilePath?: string }) {
+    this.traceFilePath =
+      typeof options?.traceFilePath === 'string' &&
+      options.traceFilePath.trim().length > 0
+        ? options.traceFilePath
+        : null
+  }
+
 
   private resolveTabId(tabId: number): number {
     let current = tabId
@@ -149,17 +160,21 @@ export class BridgeV2Runtime {
     timeoutMs = 30_000
   ): Promise<TResult> {
     const requestId = createRequestId(`req_${action}`)
+    const request = {
+      version: '1.0',
+      requestId,
+      action,
+      payload,
+      timeoutMs,
+      sentAt: new Date().toISOString()
+    }
+    if (this.traceFilePath) {
+      fs.appendFileSync(this.traceFilePath, `${JSON.stringify(request)}\n`, 'utf8')
+    }
     const response = await fetch(`${BRIDGE_BASE_URL}/v1/message`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        version: '1.0',
-        requestId,
-        action,
-        payload,
-        timeoutMs,
-        sentAt: new Date().toISOString()
-      })
+      body: JSON.stringify(request)
     })
     if (!response.ok) {
       const responseText = await response.text().catch(() => '')

@@ -46,13 +46,13 @@ To force re-login on next scraping, delete `flags.json` file and retry.
 ### Download by year (Patreon only)
 
 ```shell
-yarn run launch --recover --url https://www.patreon.com/c/<creator name>/posts --year <year> --dir output/<creator name>
+yarn run launch --patreon <example> --year <year>
 ```
 
 ### Download all by creator (Pixiv Fanbox only)
 
 ```shell
-yarn run launch --recover --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
+yarn run launch --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
 ```
 
 ### Download single post
@@ -65,15 +65,23 @@ yarn run launch --url <post url> --dir mypost
 Add `--update` flag. It will stop fetching if processed posts are encountered.
 
 ```shell
-yarn run launch --recover --update --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
+yarn run launch --update --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
 ```
 
-### V2 bridge mode (opt-in)
+### Legacy transport mode (opt-in)
 
-Add `--v2` to enable the extension bridge integration path while keeping the same `launch` command.
+Add `--v1` to force the older browser automation path instead of the default extension bridge transport.
 
 ```shell
-yarn run launch --recover --v2 --url https://www.patreon.com/c/<creator name>/posts --year <year> --dir output/<creator name>
+yarn run launch --v1 --patreon <example> --year <year>
+```
+
+### Bridge trace logging
+
+Add `--trace` to write sent bridge commands and arguments to `output/<creator>/bridge.trace` for debugging.
+
+```shell
+yarn run launch --trace --patreon <example> --year <year>
 ```
 
 ## Generate html gallery (executed automatically in any launch command)
@@ -103,7 +111,7 @@ Html gallery file is always called `gallery.html` and can be viewed in the brows
 
 Scraping can be flaky and requests may fail due to network, increasing memory footprint etc. 
 
-Use `--recover` flag to enable auto restarting browser on critical failures.
+Auto recovery is enabled by default. Use `--no-recover` to disable auto restarting browser on critical failures.
 
 ### Cloudflare captcha
 
