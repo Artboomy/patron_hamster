@@ -244,6 +244,7 @@ export class BridgeLocatorShim implements ScraperLocator {
       )
     }
     if (clickResult.href) {
+      this.runtime.expectUrl(clickResult.href, this.tabId)
       this.page.emitDownload(clickResult.href)
     }
     await this.page.emitVisibleImageResponses()
@@ -398,6 +399,11 @@ export class BridgePageShim implements ScraperPage {
 
   url(): string {
     return this.currentUrl
+  }
+
+  expectUrl(url: string): void {
+    this.runtime.expectUrl(url, this.tabId)
+    this.currentUrl = url
   }
 
   async evaluate<TResult>(

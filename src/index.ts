@@ -16,6 +16,7 @@ const cacheDir = path.resolve('./playwright-cache')
 import { clearInterval } from 'node:timers'
 import { pathToFileURL } from 'node:url'
 import { SubstackExtractor } from './extractor/substack.js'
+import { TwitterExtractor } from './extractor/twitter.js'
 import { BridgeV2Runtime } from './bridgeV2.js'
 import { BridgeContextShim } from './bridgePageShim.js'
 import type { ScraperContext, ScraperPage } from './extractor/pageTypes.js'
@@ -34,6 +35,7 @@ function readCookies(): Cookie[] {
 type LaunchArgs = ParsedArgs & {
   dir?: string
   patreon?: string
+  twitter?: string
   recover?: boolean
   trace?: boolean
   update?: boolean
@@ -60,6 +62,20 @@ export function resolveLaunchArgs(rawArgs: ParsedArgs): LaunchArgs {
     }
     args.url = `https://www.patreon.com/c/${encodeURIComponent(creator)}/posts`
     args.dir ??= path.join('output', creator)
+  }
+  if (args.twitter !== undefined) {
+    if (args.url) {
+      throw new Error('Use either --url or --twitter, not both')
+    }
+    if (typeof args.twitter !== 'string') {
+      throw new Error('No Twitter handle provided')
+    }
+    const handle = args.twitter.trim().replace(/^@/, '')
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
+      throw new Error('Twitter handle must contain 1–15 letters, numbers, or underscores')
+    }
+    args.url = `https://x.com/${handle}/media?filter=photo`
+    args.dir ??= path.join('output', handle)
   }
   if (!args.url) {
     throw new Error('No url provided')
@@ -98,7 +114,9 @@ let isFinished = false
 let cacheId: NodeJS.Timeout | null = null
 let pageUrl: string = ''
 
-function resolveSite(url: string): 'patreon' | 'pixivFanbox' | 'substack' {
+function resolveSite(
+  url: string
+): 'patreon' | 'pixivFanbox' | 'substack' | 'twitter' {
   if (url.includes('patreon')) {
     return 'patreon'
   }
@@ -108,11 +126,14 @@ function resolveSite(url: string): 'patreon' | 'pixivFanbox' | 'substack' {
   if (url.includes('substack')) {
     return 'substack'
   }
+  if (new URL(url).hostname === 'x.com') {
+    return 'twitter'
+  }
   throw Error('Unsupported url')
 }
 
 function createExtractor(
-  site: 'patreon' | 'pixivFanbox' | 'substack',
+  site: 'patreon' | 'pixivFanbox' | 'substack' | 'twitter',
   page: ScraperPage,
   context: ScraperContext,
   options: ExtractorCliOptions
@@ -126,6 +147,9 @@ function createExtractor(
   if (site === 'substack') {
     return new SubstackExtractor(page, context, options)
   }
+  if (site === 'twitter') {
+    return new TwitterExtractor(page, context, options)
+  }
   throw Error('Unsupported url')
 }
 
@@ -134,7 +158,12 @@ async function runV2(args: LaunchArgs): Promise<void> {
   const site = resolveSite(String(url))
   const traceFilePath = trace ? path.resolve(String(args.dir), 'bridge.trace') : ''
   const bridgeV2 = new BridgeV2Runtime({ traceFilePath })
-  let extractor: Extractor | FanboxExtractor | SubstackExtractor | null = null
+  let extractor:
+    | Extractor
+    | FanboxExtractor
+    | SubstackExtractor
+    | TwitterExtractor
+    | null = null
   if (traceFilePath) {
     fs.writeFileSync(traceFilePath, '', 'utf8')
     console.log(`Writing bridge trace to ${traceFilePath}`)
@@ -276,6 +305,9 @@ export async function main(args: LaunchArgs) {
   }
   const context = await chromium.launchPersistentContext(cacheDir, cfg)
   const site = resolveSite(String(url))
+  if (site === 'twitter') {
+    throw new Error('Twitter extraction requires the v2 bridge; omit --v1')
+  }
   cacheId = await runCache(context, site)
   context.setDefaultTimeout(50_000)
 

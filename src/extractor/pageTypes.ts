@@ -78,6 +78,7 @@ export interface ScraperPage {
   waitForTimeout(timeoutMs: number): Promise<void>
   fetchAsBuffer?(url: string): Promise<Buffer>
   mouse: ScraperMouse
+  expectUrl?(url: string): void
 }
 
 export interface ScraperContext {

@@ -332,6 +332,10 @@ export class BridgeV2Runtime {
     })
   }
 
+  expectUrl(url: string, tabId?: number): void {
+    this.expectedTabUrls.set(tabId || this.getTabIdOrThrow(), url)
+  }
+
   async getUrl(tabId?: number): Promise<string> {
     const targetTabId = this.resolveTabId(tabId || this.getTabIdOrThrow())
     const result = await this.sendRequest<{ url: string }>('getUrl', {

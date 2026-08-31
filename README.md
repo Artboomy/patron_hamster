@@ -1,12 +1,12 @@
 # 🐹 PatronHamster
 
-This is a content extractor for Patreon, Pixiv Fanbox, Substack sites. 
+This is a content extractor for Patreon, Pixiv Fanbox, Substack, and X (Twitter) photo media.
 
-It leverages [Playwright](https://playwright.dev/) to open Chrome instance and downloads posts, images and attachments automatically.
+It leverages Playwright and the default extension bridge transport to open Chrome and download posts, images, and attachments automatically.
 
 ## 💯 Features
 
-* Supported sites: Patreon, Pixiv Fanbox, Substack
+* Supported sites: Patreon, Pixiv Fanbox, Substack, X (Twitter photo media)
 * Each post is downloaded as [markdown](https://en.wikipedia.org/wiki/Markdown) file + images + attachments
 * Even large attachments can be downloaded - up to 100s of MB
 * HTML preview gallery generation - to view in the browser
@@ -54,6 +54,16 @@ yarn run launch --patreon <example> --year <year>
 ```shell
 yarn run launch --url https://<creator name>.fanbox.cc/posts --dir output/<creator name>
 ```
+
+### Download X (Twitter) photos
+
+Twitter extraction uses the default v2 bridge only; do not pass `--v1`. Provide a handle (with or without `@`):
+
+```shell
+yarn run launch --twitter <handle>
+```
+
+The command opens `https://x.com/<handle>/media?filter=photo`, checks that an X account is logged in, and prompts for login if needed. Images are written to `output/<handle>/`. Add `--update` to stop at the first previously downloaded image.
 
 ### Download single post
 
