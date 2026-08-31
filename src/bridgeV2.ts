@@ -117,6 +117,57 @@ export class BridgeV2Runtime {
         : null
   }
 
+  private appendTrace(entry: Record<string, unknown>): void {
+    if (!this.traceFilePath) {
+      return
+    }
+    fs.appendFileSync(
+      this.traceFilePath,
+      `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`,
+      'utf8'
+    )
+  }
+
+  async inspectHealth(): Promise<{
+    baseUrl: string
+    ok: boolean
+    status: number | null
+    body: string | null
+    diagnostics: unknown
+    error: string | null
+  }> {
+    try {
+      const response = await fetch(`${BRIDGE_BASE_URL}/health`)
+      const body = await response.text().catch(() => '')
+      let diagnostics: unknown = null
+      try {
+        const parsed: unknown = body ? JSON.parse(body) : null
+        if (parsed && typeof parsed === 'object' && 'diagnostics' in parsed) {
+          diagnostics = parsed.diagnostics
+        }
+      } catch {
+        diagnostics = null
+      }
+      return {
+        baseUrl: BRIDGE_BASE_URL,
+        ok: response.ok,
+        status: response.status,
+        body: body || null,
+        diagnostics,
+        error: null
+      }
+    } catch (error) {
+      return {
+        baseUrl: BRIDGE_BASE_URL,
+        ok: false,
+        status: null,
+        body: null,
+        diagnostics: null,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
 
   private resolveTabId(tabId: number): number {
     let current = tabId
@@ -136,18 +187,31 @@ export class BridgeV2Runtime {
 
   private async waitForHealth(timeoutMs = 10_000): Promise<void> {
     const startedAt = Date.now()
+    let lastStatus: number | null = null
+    let lastBody: string | null = null
+    let lastError: string | null = null
     while (Date.now() - startedAt < timeoutMs) {
       try {
         const healthResponse = await fetch(`${BRIDGE_BASE_URL}/health`)
+        lastStatus = healthResponse.status
+        lastBody = await healthResponse.text().catch(() => '')
         if (healthResponse.ok) {
+          this.appendTrace({
+            phase: 'health-ok',
+            baseUrl: BRIDGE_BASE_URL,
+            status: lastStatus,
+            body: lastBody
+          })
           return
         }
-      } catch (_e) {
-        // keep polling until timeout
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error)
       }
       await waitForDelay(200)
     }
-    throw new Error(`Timed out waiting for local bridge at ${BRIDGE_BASE_URL}`)
+    throw new Error(
+      `Timed out waiting for local bridge at ${BRIDGE_BASE_URL}; lastStatus=${String(lastStatus)}; lastError=${lastError || 'none'}; lastBody=${lastBody || 'none'}`
+    )
   }
 
   async ensureReady(): Promise<void> {
@@ -168,16 +232,21 @@ export class BridgeV2Runtime {
       timeoutMs,
       sentAt: new Date().toISOString()
     }
-    if (this.traceFilePath) {
-      fs.appendFileSync(this.traceFilePath, `${JSON.stringify(request)}\n`, 'utf8')
-    }
+    this.appendTrace({ phase: 'request', request })
     const response = await fetch(`${BRIDGE_BASE_URL}/v1/message`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(request)
     })
+    const responseText = await response.text()
+    this.appendTrace({
+      phase: 'response',
+      action,
+      requestId,
+      httpStatus: response.status,
+      body: responseText
+    })
     if (!response.ok) {
-      const responseText = await response.text().catch(() => '')
       throw new BridgeActionError({
         action,
         requestId,
@@ -185,7 +254,7 @@ export class BridgeV2Runtime {
         message: `HTTP ${response.status}${responseText ? ` body=${responseText}` : ''}`
       })
     }
-    const body = (await response.json()) as BridgeResponse<TResult>
+    const body = JSON.parse(responseText) as BridgeResponse<TResult>
     if (!body.ok) {
       throw new BridgeActionError({
         action,
@@ -460,20 +529,11 @@ export class BridgeV2Runtime {
   }
 
   async fetchAsBase64(url: string, tabId?: number): Promise<string> {
-    return this.evaluate<string>(
-      `((targetUrl) => fetch(targetUrl)
-        .then((res) => res.arrayBuffer())
-        .then((buf) => {
-          const bytes = new Uint8Array(buf);
-          let binary = '';
-          for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-          }
-          return btoa(binary);
-        }))(args[0])`,
-      [url],
-      tabId
-    )
+    void tabId
+    const result = await this.sendRequest<{ base64: string }>('fetchBinary', {
+      url
+    })
+    return result.base64
   }
 
   async dispose(): Promise<void> {

@@ -50,16 +50,44 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
   }
 
   const imageBuffer = fs.readFileSync(fixtureImagePath)
+  const protectedAssetPath = '/assets/protected.png'
+  const assetServer = http.createServer((req, res) => {
+    if (!req.url) {
+      send(res, 400, 'Bad request', 'text/plain; charset=utf-8')
+      return
+    }
+    const url = new URL(req.url, 'http://127.0.0.1')
+    if (url.pathname === protectedAssetPath || url.pathname === '/assets/sample.png') {
+      send(res, 200, imageBuffer, 'image/png')
+      return
+    }
+    send(res, 404, 'Not found', 'text/plain; charset=utf-8')
+  })
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException) => {
+      assetServer.off('listening', onListening)
+      reject(error)
+    }
+    const onListening = () => {
+      assetServer.off('error', onError)
+      resolve()
+    }
+    assetServer.once('error', onError)
+    assetServer.once('listening', onListening)
+    assetServer.listen(0, '127.0.0.1')
+  })
+  const assetAddress = assetServer.address()
+  if (!assetAddress || typeof assetAddress === 'string') {
+    throw new Error('Failed to resolve mock asset server address')
+  }
+  const protectedAssetUrl = `http://127.0.0.1:${assetAddress.port}${protectedAssetPath}`
+
   const server = http.createServer((req, res) => {
     if (!req.url) {
       send(res, 400, 'Bad request', 'text/plain; charset=utf-8')
       return
     }
     const url = new URL(req.url, 'http://127.0.0.1')
-    if (url.pathname === '/assets/sample.png') {
-      send(res, 200, imageBuffer, 'image/png')
-      return
-    }
     if (url.pathname === '/next') {
       send(
         res,
@@ -72,6 +100,7 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
     if (url.pathname === '/slow') {
       const delayMs = parseDelayMs(req)
       setTimeout(() => {
+        res.setHeader('set-cookie', 'bridgeAuth=1; Path=/; SameSite=Lax')
         send(
           res,
           200,
@@ -81,8 +110,8 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
           <div class="item">Item 1</div>
           <div class="item">Item 2</div>
           <button id="action-button">Click me</button>
-          <a id="download-link" href="/assets/sample.png">Download image</a>
-          <img id="sample-image" src="/assets/sample.png" alt="sample image" />
+          <a id="download-link" href="${protectedAssetUrl}">Download image</a>
+          <img id="sample-image" src="${protectedAssetUrl}" alt="sample image" />
           <script>
             window.__clickCount = 0;
             const button = document.getElementById('action-button');
@@ -100,6 +129,7 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
       return
     }
 
+    res.setHeader('set-cookie', 'bridgeAuth=1; Path=/; SameSite=Lax')
     send(
       res,
       200,
@@ -109,8 +139,8 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
         <div class="item">Item 1</div>
         <div class="item">Item 2</div>
         <button id="action-button">Click me</button>
-        <a id="download-link" href="/assets/sample.png">Download image</a>
-        <img id="sample-image" src="/assets/sample.png" alt="sample image" />
+        <a id="download-link" href="${protectedAssetUrl}">Download image</a>
+        <img id="sample-image" src="${protectedAssetUrl}" alt="sample image" />
         <a id="next-link" href="/next">Next</a>
         <script>
           window.__clickCount = 0;
@@ -146,18 +176,23 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
     throw new Error('Failed to resolve mock server address')
   }
 
+  const closeServer = async (target: http.Server): Promise<void> =>
+    await new Promise<void>((resolve, reject) => {
+      target.close((error) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve()
+      })
+    })
+
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     fixtureImagePath,
-    close: async () =>
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error) {
-            reject(error)
-            return
-          }
-          resolve()
-        })
-      })
+    close: async () => {
+      await closeServer(server)
+      await closeServer(assetServer)
+    }
   }
 }

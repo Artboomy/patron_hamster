@@ -144,12 +144,14 @@ const testCases: TestCase[] = [
   {
     name: 'image download path and response body acquisition are correct',
     run: async (ctx) => {
-      assert(ctx.page, 'Expected initialized page from previous test')
+      assert(ctx.page && ctx.tabId !== null, 'Expected initialized page from previous test')
 
       // Arrange
       logStep('Arrange', 'attach response listener and prepare temp output directory')
       const responseBodies: Buffer[] = []
       const expected = fs.readFileSync(ctx.mockServer.fixtureImagePath)
+      const imageUrl = await ctx.page.locator('#sample-image').getAttribute('src')
+      assert(typeof imageUrl === 'string' && imageUrl.length > 0, 'Expected sample image URL')
       ctx.page.on('response', (response) => {
         void response
           .body()
@@ -164,7 +166,26 @@ const testCases: TestCase[] = [
 
       try {
         // Act
-        logStep('Act', 'click download link and save emitted download')
+        logStep('Act', 'prove page-context fetch is blocked, then save via bridge binary fetch')
+        let pageFetchError: unknown = null
+        try {
+          await ctx.runtime.evaluate<number>(
+            `((targetUrl) => fetch(targetUrl, { credentials: 'include' })
+              .then((res) => res.arrayBuffer())
+              .then((buf) => buf.byteLength))(args[0])`,
+            [imageUrl],
+            ctx.tabId
+          )
+        } catch (error) {
+          pageFetchError = error
+        }
+        assert(pageFetchError instanceof BridgeActionError, 'Expected page-context fetch to fail through bridge evaluate')
+        assert(pageFetchError.code === 'RUNTIME_ERROR', `Expected RUNTIME_ERROR, got ${pageFetchError.code}`)
+        assert(
+          pageFetchError.message.includes('Failed to fetch'),
+          `Expected cross-origin fetch failure, got ${pageFetchError.message}`
+        )
+
         const downloadPromise = ctx.page.waitForEvent('download')
         await ctx.page.locator('#download-link').click()
         const resolvedDownload = await downloadPromise
@@ -172,13 +193,13 @@ const testCases: TestCase[] = [
         await resolvedDownload.saveAs(downloadedFilePath)
 
         // Assert
-        logStep('Assert', 'downloaded file and streamed response body equal fixture')
+        logStep('Assert', 'downloaded file and response body equal fixture despite page fetch failure')
         const saved = fs.readFileSync(downloadedFilePath)
         assert(saved.equals(expected), 'Downloaded image does not match fixture image')
         await waitForResponseBodies(responseBodies)
         assert(
           responseBodies.some((body) => body.equals(expected)),
-          'Shim response body stream did not include fixture image payload'
+          'Shim response body stream did not include cross-origin fixture image payload'
         )
       } finally {
         fs.rmSync(outputDir, { recursive: true, force: true })

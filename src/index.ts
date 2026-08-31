@@ -6,13 +6,13 @@ import type { ParsedArgs } from 'minimist'
 import { waitForDelay, waitForEnter } from './utils.js'
 import { Extractor } from './extractor.js'
 import path from 'path'
+import { generateGalleryHtml } from './galleryHtml.js'
 import { runCache } from './cache.js'
 import { FanboxExtractor } from './extractor/fanbox.js'
 import { fileName, saveCookies } from './saveCookies.js'
 import { oraPromise } from 'ora'
 const cacheDir = path.resolve('./playwright-cache')
 
-import { exec } from 'child_process'
 import { clearInterval } from 'node:timers'
 import { pathToFileURL } from 'node:url'
 import { SubstackExtractor } from './extractor/substack.js'
@@ -75,20 +75,8 @@ export type ExtractorCliOptions = {
   updateMode: boolean
 }
 
-async function runTocHtml(dirPath: string) {
-  const command = `yarn run toc:html --dir "${dirPath}"`
-
-  // Wrap exec in a Promise so we can await it:
-  return new Promise((resolve, reject) => {
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        reject(error) // Reject on error
-        return
-      }
-      // Otherwise resolve with stdout & stderr if needed
-      resolve({ stdout, stderr })
-    })
-  })
+async function generateDefaultGallery(dirPath: string) {
+  return generateGalleryHtml(dirPath)
 }
 
 function prepareDir(dirName: string, updateMode: boolean) {
@@ -152,9 +140,19 @@ async function runV2(args: LaunchArgs): Promise<void> {
     console.log(`Writing bridge trace to ${traceFilePath}`)
   }
   try {
+    console.log(`| V2 bridge base URL: ${process.env.BRIDGE_BASE_URL || 'http://127.0.0.1:17353'}`)
     await oraPromise(startLocalBridgeServer(), 'Starting in-process v2 bridge')
     await oraPromise(bridgeV2.ensureReady(), 'Connecting to in-process v2 bridge')
+    const bridgeHealth = await bridgeV2.inspectHealth()
+    console.log(
+      `| V2 bridge health after connect: ${JSON.stringify({
+        status: bridgeHealth.status,
+        diagnostics: bridgeHealth.diagnostics,
+        error: bridgeHealth.error
+      })}`
+    )
     await oraPromise(bridgeV2.ping(), 'Pinging v2 local bridge')
+    console.log('| V2 bridge ping succeeded')
     const context = new BridgeContextShim(bridgeV2)
     context.setDefaultTimeout(50_000)
     const page = await context.newPage()
@@ -170,16 +168,44 @@ async function runV2(args: LaunchArgs): Promise<void> {
       console.log(`⏯  Continuing from ${pageUrl}`)
     }
     const finalDir = await extractor.extract(pageUrl || String(url), String(year))
-    await oraPromise(runTocHtml(finalDir), 'Generating html gallery...')
+    await oraPromise(generateDefaultGallery(finalDir), 'Generating Twitter-style gallery...')
     if (extractor.lockedCount) {
       console.log(`${extractor.lockedCount} locked posts were not downloaded`)
     }
     console.log('💯 Extractor finished.')
     await context.close()
   } catch (e) {
+    const bridgeHealth = await bridgeV2.inspectHealth().catch((healthError) => ({
+      baseUrl: process.env.BRIDGE_BASE_URL || 'http://127.0.0.1:17353',
+      ok: false,
+      status: null,
+      body: null,
+      diagnostics: null,
+      error: healthError instanceof Error ? healthError.message : String(healthError)
+    }))
     if (e instanceof BridgeActionError) {
       console.error('V2 bridge action failed:', e.message)
+      console.error(
+        'V2 bridge action details:',
+        JSON.stringify({
+          action: e.action,
+          requestId: e.requestId,
+          code: e.code,
+          details: e.details
+        })
+      )
     }
+    console.error(
+      'V2 bridge health snapshot:',
+      JSON.stringify({
+        baseUrl: bridgeHealth.baseUrl,
+        ok: bridgeHealth.ok,
+        status: bridgeHealth.status,
+        diagnostics: bridgeHealth.diagnostics,
+        error: bridgeHealth.error,
+        body: bridgeHealth.body
+      })
+    )
     if (extractor) {
       pageUrl = extractor.pageUrl
       if (extractor.lockedCount) {
@@ -272,7 +298,7 @@ export async function main(args: LaunchArgs) {
       console.log(`⏯  Continuing from ${pageUrl}`)
     }
     const finalDir = await extractor.extract(pageUrl || url, String(year))
-    await oraPromise(runTocHtml(finalDir), 'Generating html gallery...')
+    await oraPromise(generateDefaultGallery(finalDir), 'Generating Twitter-style gallery...')
   } catch (e) {
     pageUrl = extractor.pageUrl
     if (extractor.lockedCount) {

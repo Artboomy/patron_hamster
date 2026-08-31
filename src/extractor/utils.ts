@@ -5,7 +5,7 @@ import path from 'path'
 import { exiftool } from 'exiftool-vendored'
 import type { ScraperPage } from './pageTypes.js'
 import { imageExtensions } from '../constants.js'
-import { waitForDelay } from '../utils.js'
+import { normalizeFileName, waitForDelay } from '../utils.js'
 
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT || 17353)
 const BRIDGE_HOST = process.env.BRIDGE_HOST || '127.0.0.1'
@@ -25,7 +25,7 @@ export function resolveOutputFilePath(
   outputPath: string,
   fileName: string
 ): string {
-  return path.resolve(outputPath, path.basename(fileName))
+  return path.resolve(outputPath, normalizeFileName(fileName))
 }
 
 export async function downloadFile(
@@ -46,7 +46,7 @@ export async function downloadFile(
     (i) => i || { ext: 'file', mime: 'unknown' }
   )
   const fileName = hasExtension(name) ? name : `${name}.${ext}`
-  const safeFileName = path.basename(fileName)
+  const safeFileName = normalizeFileName(fileName)
   const filePath = resolveOutputFilePath(outputPath, safeFileName)
   await saveBufferToDisk({
     buffer: resultBuffer,
@@ -65,6 +65,9 @@ export async function linkToBuffer(
   fileUrl: string,
   maxRetries = 5
 ): Promise<Buffer> {
+  if (typeof page.fetchAsBuffer === 'function') {
+    return page.fetchAsBuffer(fileUrl)
+  }
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const array = await page.evaluate(async (url) => {
@@ -79,20 +82,20 @@ export async function linkToBuffer(
         return Array.from(new Uint8Array(await blob.arrayBuffer()))
       }, fileUrl)
 
-      return Buffer.from(array) // Success
+      return Buffer.from(array)
     } catch (err) {
       if (attempt < maxRetries) {
-        const delay = 500 + Math.floor(Math.random() * 200) // 500–700ms
+        const delay = 500 + Math.floor(Math.random() * 200)
         console.warn(`⚠️ Attempt ${attempt} failed. Retrying in ${delay}ms...`)
         await waitForDelay(delay)
       } else {
         console.error(`❌ All ${maxRetries} attempts failed for ${fileUrl}`)
-        throw err // Re-throw the final error
+        throw err
       }
     }
   }
 
-  throw new Error('Unexpected retry exit') // Just in case
+  throw new Error('Unexpected retry exit')
 }
 
 export async function saveBufferToDisk({

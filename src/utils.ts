@@ -77,6 +77,12 @@ export function parseDate(input: string): Date {
   return now
 }
 
+export type AttachmentRef = {
+  href: string
+  fileName: string
+  path: string
+}
+
 export function patchLinks({
   html,
   imageMap,
@@ -86,7 +92,7 @@ export function patchLinks({
   html: string
   imageMap: Record<string, string>
   site: 'patreon' | 'pixivFanbox' | 'substack'
-  attachments: string[]
+  attachments: AttachmentRef[]
 }): string {
   const $ = cheerio.load(html) // Load HTML into Cheerio
   if (site === 'substack') {
@@ -136,23 +142,19 @@ export function patchLinks({
       if (!href || !isDownload) {
         return
       }
-      const replacement = attachments.find((attachment) =>
-        href.includes(attachment)
-      )
+      const replacement = attachments.find((attachment) => attachment.href === href)
       if (replacement) {
         if (href.endsWith('.mp4')) {
-          // Create <video> and <source> elements
           const videoTag = $('<video controls=""></video>')
           const sourceTag = $('<source type="video/mp4">').attr(
             'src',
-            replacement
+            replacement.path
           )
           videoTag.append(sourceTag)
           $(anchor).replaceWith(videoTag)
           console.log('Embedded video')
         } else {
-          // replace with img
-          const imgTag = $('<img alt="Attachment"/>').attr('src', replacement)
+          const imgTag = $('<img alt="Attachment"/>').attr('src', replacement.path)
           $(anchor).replaceWith(imgTag)
           console.log('Embedded image')
         }
@@ -216,10 +218,35 @@ export async function randomMouseMovements(page: ScraperPage, moveCount = 5) {
   }
 }
 
+const asciiFilenameReplacements: Record<string, string> = {
+  ß: 'ss',
+  Æ: 'AE',
+  æ: 'ae',
+  Ø: 'O',
+  ø: 'o',
+  Œ: 'OE',
+  œ: 'oe',
+  Ł: 'L',
+  ł: 'l',
+  Đ: 'D',
+  đ: 'd',
+  Þ: 'Th',
+  þ: 'th'
+}
+
+export function normalizeFileName(fileName: string): string {
+  return path
+    .basename(fileName)
+    .normalize('NFKD')
+    .replace(/[ßÆæØøŒœŁłĐđÞþ]/g, (letter) => asciiFilenameReplacements[letter] || letter)
+    .replace(/\p{Mark}+/gu, '')
+}
+
 export function getFileChecker(directory: string) {
-  const files = fs.readdirSync(directory).map((file) => path.basename(file))
   return (id: string) => {
-    return files.find((file) => file.includes(id)) || null
+    const needle = normalizeFileName(id)
+    const files = fs.readdirSync(directory).map((file) => path.basename(file))
+    return files.find((file) => normalizeFileName(file).includes(needle)) || null
   }
 }
 

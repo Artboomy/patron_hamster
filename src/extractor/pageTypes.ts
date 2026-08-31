@@ -76,6 +76,7 @@ export interface ScraperPage {
   off(event: 'response', listener: (response: ScraperResponse) => void): void
   waitForEvent(event: 'download'): Promise<ScraperDownload>
   waitForTimeout(timeoutMs: number): Promise<void>
+  fetchAsBuffer?(url: string): Promise<Buffer>
   mouse: ScraperMouse
 }
 

@@ -1,6 +1,7 @@
 import { Extractor, imageHook } from '../extractor.js'
 import type { ScraperPage } from './pageTypes.js'
 import ora, { oraPromise } from 'ora'
+import type { AttachmentRef } from '../utils.js'
 import {
   humanLikeScrollToBottom,
   waitForDelay,
@@ -160,8 +161,12 @@ export class SubstackExtractor extends Extractor {
     return imageIdToName
   }
 
-  async saveAttachments(): Promise<string[]> {
-    // TODO: implement
+  async saveAttachments(_cfg: {
+    page: ScraperPage
+    outDir: string
+    timestamp: Date
+    postId: string
+  }): Promise<AttachmentRef[]> {
     return []
   }
 

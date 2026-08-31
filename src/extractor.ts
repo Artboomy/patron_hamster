@@ -6,8 +6,10 @@ import type {
 } from './extractor/pageTypes.js'
 import {
   getFileChecker,
+  normalizeFileName,
   randomMouseMovements,
   patchLinks,
+  type AttachmentRef,
   waitForDelay,
   waitForEnter,
   waitForObjLen
@@ -26,7 +28,6 @@ import {
 import { saveCookies } from './saveCookies.js'
 import { fileTypeFromBuffer } from 'file-type'
 import ora, { oraPromise } from 'ora'
-import { imageExtensions } from './constants.js'
 
 const VISITED_URLS = 'visited.txt'
 
@@ -457,12 +458,10 @@ export class Extractor {
     tags: string[]
   }) {
     const { page, outDir, timestamp, tags } = cfg
+    const checkFileExists = getFileChecker(outDir)
     await this.cloudflareGuard(page, 'saveImageOnlyPost', cfg)
     const name = await this.getPageName(page)
-    const id = await page.evaluate(() =>
-      // @ts-ignore this is browser context
-      location.pathname.replace('/posts/', '').split('-').at(-1)
-    )
+    const id = await this.getPostId(page)
     console.log(`| Post date: ${timestamp}`)
     const savedImages: Record<string, boolean> = {}
     const imageIdToName: Record<string, string> = {}
@@ -472,7 +471,7 @@ export class Extractor {
       imageIdToName,
       checkDesiredImage: (url: string) =>
         url.includes('eyJxIjoxMDAsIndlYnAiOjB9') && url.includes(id),
-      checkFileExists: (i: string) => this.checker(i),
+      checkFileExists,
       getImageId: (u: string) => u.split('?')[0].split('/').at(-3) as string,
       postName: name,
       outDir,
@@ -535,7 +534,7 @@ export class Extractor {
     if (staticImageUrls.length > 0) {
       for (const url of staticImageUrls) {
         const imageId = url.split('?')[0].split('/').at(-3) as string
-        imageIdToName[imageId] = this.checker(imageId) || ''
+        imageIdToName[imageId] = checkFileExists(imageId) || ''
         if (!imageIdToName[imageId]) {
           const img = await linkToBuffer(page, url)
           imageIdToName[imageId] = await downloadFile(
@@ -632,6 +631,21 @@ export class Extractor {
     return getPatreonPostNameFromPathname(pathname)
   }
 
+  async getPostId(page: ScraperPage): Promise<string> {
+    const pathname = await page.evaluate(
+      () =>
+        // @ts-ignore this is browser context
+        location.pathname
+    )
+    const postSegment = pathname.split('/posts/').at(1)?.split('/')[0]
+    if (postSegment) {
+      return postSegment.split('-').at(-1) || postSegment
+    }
+    const fallback = pathname.split('/').filter(Boolean).at(-1) || ''
+    return fallback.split('-').at(-1) || fallback
+  }
+
+
   getAttachmentName(_href: string, filename: string) {
     return filename
   }
@@ -639,12 +653,14 @@ export class Extractor {
   async saveAttachments({
     page,
     outDir,
-    timestamp
+    timestamp,
+    postId
   }: {
     page: ScraperPage
     outDir: string
     timestamp: Date
-  }): Promise<string[]> {
+    postId: string
+  }): Promise<AttachmentRef[]> {
     const urlLocator = page.locator(this.selectors.attachments)
     const urls: Array<{ href: string; filename: string }> = (
       await urlLocator.evaluateAll((elements) =>
@@ -661,33 +677,40 @@ export class Extractor {
       return []
     }
     console.log(`📦 Found ${urls.length} attachments...`)
-    const list: string[] = []
+    const list: AttachmentRef[] = []
+    const attachmentDirName = normalizeFileName(postId)
+    const attachmentDir = path.resolve(outDir, attachmentDirName)
+    fs.mkdirSync(attachmentDir, { recursive: true })
+    const checkFileExists = getFileChecker(attachmentDir)
 
-    let i = 0
     for (const { href, filename } of urls) {
       const spinner = ora(`Saving file ${href} to ${filename}.`).start()
       const outputFileName = path.basename(filename)
-      if (this.checker(outputFileName)) {
-        spinner.succeed(`File ${outputFileName} already exists, skipping`)
-        list.push(outputFileName)
+      const existingFileName = checkFileExists(outputFileName)
+      if (existingFileName) {
+        spinner.succeed(`File ${existingFileName} already exists, skipping`)
+        list.push({
+          href,
+          fileName: existingFileName,
+          path: path.posix.join(attachmentDirName, existingFileName)
+        })
         continue
       }
-      if (imageExtensions.some((z) => href.endsWith(z))) {
-        // console.log(`Direct download for ${href}`)
-        const img = await linkToBuffer(page, href)
-        await downloadFile(href, outDir, outputFileName, timestamp, [], img)
-      } else {
-        const [download] = await Promise.all([
-          page.waitForEvent('download'),
-          urlLocator.nth(i).click()
-        ])
-        const filePath = resolveOutputFilePath(outDir, outputFileName)
-        await download.saveAs(filePath)
-        fs.utimesSync(filePath, timestamp, timestamp)
-      }
-      list.push(outputFileName)
+      const fileBuffer = await linkToBuffer(page, href)
+      const savedFileName = await downloadFile(
+        href,
+        attachmentDir,
+        outputFileName,
+        timestamp,
+        [],
+        fileBuffer
+      )
+      list.push({
+        href,
+        fileName: savedFileName,
+        path: path.posix.join(attachmentDirName, savedFileName)
+      })
       spinner.succeed()
-      i++
     }
     return list
   }
@@ -704,10 +727,16 @@ export class Extractor {
       }
     }
     const name = await this.getPageName(page)
+    const postId = await this.getPostId(page)
     const tags = await this.getTags(page)
     const timestamp = await this.getPostDate(page)
     const contentBlock = this.getContentBlock(page)
-    const attachments = await this.saveAttachments({ page, outDir, timestamp })
+    const attachments = await this.saveAttachments({
+      page,
+      outDir,
+      timestamp,
+      postId
+    })
     const imageIdToName = await this.saveImageOnlyPost({
       page,
       outDir,
@@ -735,7 +764,9 @@ ${content}
       markdown += `\n\n ## Gallery\n${Object.values(imageIdToName).map((i) => `![${i}](${i})\n`)}`
     }
     if (attachments.length) {
-      markdown += `\n\n ## Attachments\n ${attachments.map((i) => `[${i}](${i})`).join('\n')}`
+      markdown += `\n\n ## Attachments\n ${attachments
+        .map((attachment) => `[${attachment.fileName}](${attachment.path})`)
+        .join('\n')}`
     }
     if (tags.length) {
       markdown += `\n\n ## Tags\n ${tags.map((t) => '`' + t + '`').join(' ')}`

@@ -84,11 +84,12 @@ Add `--trace` to write sent bridge commands and arguments to `output/<creator>/b
 yarn run launch --trace --patreon <example> --year <year>
 ```
 
-## Generate html gallery (executed automatically in any launch command)
+## Generate HTML gallery
 
-Example:
+`toc:html` is generated automatically by launch commands. Run `gallery:html` to replace `gallery.html` with the Twitter-style chronological feed, including each post's title, publication date, text, images, and attachment links.
+
 ```shell
-yarn run toc:html --dir "C:\patreon_extractor\output\creator\2025"
+yarn run gallery:html --dir "C:\patreon_extractor\output\creator\2025"
 ```
 
 ## Generate epub (for Substack only)

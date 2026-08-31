@@ -70,19 +70,25 @@ async function run(): Promise<void> {
     assert(healthResponse.ok, `Health endpoint failed: HTTP ${healthResponse.status}`);
     const healthBody = (await healthResponse.json()) as { ok?: boolean };
     assert(healthBody.ok === true, 'Health response should include ok=true');
+    console.log(
+      '[self-test] bridge health:',
+      JSON.stringify(healthBody)
+    );
 
-  const pingRequest: Record<string, unknown> = {
-    version: '1.0',
-    requestId: 'req_ping_1',
-    action: 'ping',
-    payload: { echo: 'hello-extension' },
-    timeoutMs: 10000,
-    sentAt: new Date().toISOString()
-  };
-  const pingResponse = await sendRequest(baseUrl, pingRequest);
-  assert(pingResponse.requestId === pingRequest.requestId, 'ping requestId mismatch');
-  assert(pingResponse.ok === true, 'ping should be successful');
-  assert(pingResponse.result?.status === 'ok', 'ping result.status should be ok');
+    const pingRequest: Record<string, unknown> = {
+      version: '1.0',
+      requestId: 'req_ping_1',
+      action: 'ping',
+      payload: { echo: 'hello-extension' },
+      timeoutMs: 10000,
+      sentAt: new Date().toISOString()
+    };
+    console.log('[self-test] ping request:', JSON.stringify(pingRequest));
+    const pingResponse = await sendRequest(baseUrl, pingRequest);
+    console.log('[self-test] ping response:', JSON.stringify(pingResponse));
+    assert(pingResponse.requestId === pingRequest.requestId, 'ping requestId mismatch');
+    assert(pingResponse.ok === true, 'ping should be successful');
+    assert(pingResponse.result?.status === 'ok', 'ping result.status should be ok');
   assert(typeof pingResponse.result?.hostName === 'string', 'ping result.hostName should exist');
 
   const openTabRequest: Record<string, unknown> = {

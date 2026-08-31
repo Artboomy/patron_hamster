@@ -285,31 +285,47 @@ test.describe('Bridge E2E', () => {
       BridgePageShim: new (runtime: RuntimeLike, tabId: number, initialUrl?: string) => PageShimLike
     }
 
+    let imageUrl = ''
     await test.step('Arrange: open mock page and prepare fixture/output', async () => {
       const opened = await runtime.openTab(mockServer.baseUrl, true)
       tabId = opened.tabId
       page = new BridgePageShim(runtime, tabId, mockServer.baseUrl)
       await page.waitForSelector('#download-link', { state: 'visible', timeout: 10_000 })
+      imageUrl = await page.evaluate<string>((selector) => {
+        const image = document.querySelector(String(selector))
+        return image instanceof HTMLImageElement ? image.src : ''
+      }, '#sample-image')
+      expect(imageUrl).toContain('/assets/protected.png')
     })
 
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-download-'))
     try {
-      await test.step('Act: trigger download and save file', async () => {
+      await test.step('Act: page-context fetch fails but bridge fetchAsBase64 succeeds', async () => {
+        await expect(
+          runtime!.evaluate<number>(
+            `((targetUrl) => fetch(targetUrl, { credentials: 'include' })
+              .then((res) => res.arrayBuffer())
+              .then((buf) => buf.byteLength))(args[0])`,
+            [imageUrl],
+            tabId as number
+          )
+        ).rejects.toThrow(/Failed to fetch/)
+
+        const base64 = await runtime!.fetchAsBase64(imageUrl, tabId as number)
+        const decoded = Buffer.from(base64, 'base64')
+        const expected = fs.readFileSync(mockServer.fixtureImagePath)
+        expect(decoded.equals(expected)).toBe(true)
+      })
+
+      await test.step('Assert: triggered download saves the fixture image', async () => {
         const downloadPromise = page!.waitForEvent('download')
         await page!.locator('#download-link').click()
         const download = await downloadPromise
         await download.saveAs(path.join(outputDir, 'downloaded.png'))
-      })
 
-      await test.step('Assert: downloaded file and fetchAsBase64 match fixture image', async () => {
         const expected = fs.readFileSync(mockServer.fixtureImagePath)
         const saved = fs.readFileSync(path.join(outputDir, 'downloaded.png'))
         expect(saved.equals(expected)).toBe(true)
-
-        const imageUrl = `${mockServer.baseUrl}/assets/sample.png`
-        const base64 = await runtime!.fetchAsBase64(imageUrl, tabId as number)
-        const decoded = Buffer.from(base64, 'base64')
-        expect(decoded.equals(expected)).toBe(true)
       })
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true })

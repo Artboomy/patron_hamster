@@ -448,6 +448,11 @@ export class BridgePageShim implements ScraperPage {
     await this.runtime.sleep(timeoutMs)
   }
 
+  async fetchAsBuffer(url: string): Promise<Buffer> {
+    const base64 = await this.runtime.fetchAsBase64(url, this.tabId)
+    return Buffer.from(base64, 'base64')
+  }
+
   emitDownload(href: string): void {
     const download = new BridgeDownloadShim(this.runtime, this.tabId, href)
     const resolver = this.downloadWaiters.shift()

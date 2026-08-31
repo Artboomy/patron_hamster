@@ -214,6 +214,35 @@ async function fetchResizeImage(url: string): Promise<{
     bitmap.close();
   }
 }
+async function fetchBinaryAsBase64(url: string): Promise<{
+  base64: string;
+  mimeType: string;
+}> {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    credentials: 'include'
+  });
+  if (!response.ok) {
+    throw createBridgeError('HTTP_ERROR', `Binary fetch failed: HTTP ${response.status}`, true, {
+      status: response.status,
+      statusText: response.statusText,
+      url
+    });
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return {
+    base64: btoa(binary),
+    mimeType: response.headers.get('content-type') ?? 'application/octet-stream'
+  };
+}
 
 async function uploadRecentImage(
   imageUrl: string,
@@ -633,6 +662,20 @@ async function executeAction(request: BridgeRequest): Promise<{ result?: unknown
       meta: {
         tabId,
         actionPayload: { expression }
+      }
+    };
+  }
+  if (request.action === 'fetchBinary') {
+    const url = typeof payload.url === 'string' ? payload.url : '';
+    if (!url) {
+      throw createBridgeError('INVALID_PAYLOAD', 'fetchBinary expects payload.url', false, payload);
+    }
+
+    const fetched = await fetchBinaryAsBase64(url);
+    return {
+      result: fetched,
+      meta: {
+        url
       }
     };
   }
