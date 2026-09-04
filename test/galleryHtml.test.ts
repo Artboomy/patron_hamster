@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { JSDOM } from 'jsdom'
 import { afterEach, describe, expect, it } from 'vitest'
 import { generateGalleryHtml } from '../src/galleryHtml.js'
 
@@ -20,7 +21,7 @@ describe('generateGalleryHtml', () => {
     fs.mkdirSync(yearDir)
     fs.writeFileSync(
       path.join(yearDir, 'older-10.md'),
-      '# [Older post](https://example.com/older-10)\n\n*Date: 1 January 2026*\n'
+      '# [Older post](https://example.com/older-10)\n\n*Date: 1 January 2026*\n\n## Gallery\n![Older preview](older-preview.jpg)\n'
     )
     fs.writeFileSync(
       path.join(yearDir, 'newer-20.md'),
@@ -39,32 +40,58 @@ describe('generateGalleryHtml', () => {
     const html = fs.readFileSync(outputFile, 'utf8')
 
     expect(outputFile).toBe(path.join(yearDir, 'gallery.html'))
-    expect(html).toContain('class="timeline"')
-    expect(html).toContain('class="post"')
-    expect(html.indexOf('Newer post')).toBeLessThan(html.indexOf('Older post'))
-    expect(html.indexOf('Older post')).toBeLessThan(html.indexOf('December post'))
-    expect(html).toContain('Post text')
-    expect(html).toContain('src="preview.jpg"')
-    expect(html).toContain('src="second-preview.jpg"')
-    expect(html).toContain('flex-wrap: nowrap')
-    expect(html).toContain('class="carousel"')
-    expect(html).toContain('aria-label="Next image"')
-    expect(html).toContain("event.key === 'ArrowRight'")
-    expect(html).toContain('class="carousel-counter"')
-    expect(html).toContain('class="carousel-copy-path"')
-    expect(html).toContain('Copy image path')
-    expect(html).toContain('class="feed-rotate"')
-    expect(html).toContain('aria-label="Rotate feed 90 degrees"')
-    expect(html).toContain("feedViewport.classList.toggle('is-rotated')")
-    expect(html).toContain('href="20/video.mp4"')
-    expect(html).toContain('photo-scrubber')
-    expect(html).toContain('aria-label="Post months"')
-    expect(html).toContain('January 2026')
-    expect(html).toContain('February 2026')
-    expect(html).toContain('id="month-2026-02"')
-    expect(html).toContain('data-target="month-2026-01"')
-    expect(html).toContain("scrollIntoView({ block: 'start' })")
-    expect(html).toContain('data-date="2026-02-01"')
-    expect(html).toContain('data-date="2025-12-01"')
+    const createGalleryDom = (bookmark?: string) =>
+      new JSDOM(html, {
+        beforeParse(window) {
+          window.IntersectionObserver = class {
+            observe() {}
+          }
+          window.HTMLElement.prototype.scrollIntoView = () => {}
+          window.requestAnimationFrame = (callback) => {
+            callback(Date.now())
+            return 0
+          }
+          window.cancelAnimationFrame = () => {}
+        },
+        runScripts: 'dangerously',
+        url: `file:///gallery.html${bookmark ? `#image=${encodeURIComponent(bookmark)}` : ''}`
+      })
+
+    const dom = createGalleryDom()
+    const posts = [...dom.window.document.querySelectorAll('.post')]
+    expect(posts.map((post) => post.textContent)).toEqual([
+      expect.stringContaining('February post'),
+      expect.stringContaining('Newer post'),
+      expect.stringContaining('Older post'),
+      expect.stringContaining('December post')
+    ])
+    expect(dom.window.document.querySelector('a[href="20/video.mp4"]')).not.toBeNull()
+    expect(dom.window.document.querySelector('[photo-scrubber]')).not.toBeNull()
+    const firstImage = dom.window.document.querySelector('img[src="preview.jpg"]')
+    const carouselImage = dom.window.document.querySelector('.carousel-image')
+    const nextButton = dom.window.document.querySelector('.carousel-next')
+    const bookmarkButton = dom.window.document.querySelector('.carousel-bookmark')
+    const zoomInButton = dom.window.document.querySelector('.carousel-zoom-in')
+
+    firstImage?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    expect(carouselImage?.getAttribute('src')).toContain('preview.jpg')
+    bookmarkButton?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    expect(dom.window.location.hash).toBe('#image=preview.jpg')
+    expect(bookmarkButton?.textContent).toBe('Bookmarked')
+    const initialTransform = carouselImage?.getAttribute('style')
+    zoomInButton?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    expect(carouselImage?.getAttribute('style')).not.toBe(initialTransform)
+
+    nextButton?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+    expect(carouselImage?.getAttribute('src')).toContain('second-preview.jpg')
+    expect(dom.window.location.hash).toBe('#image=second-preview.jpg')
+    dom.window.close()
+
+    const resumedDom = createGalleryDom('second-preview.jpg')
+    expect(resumedDom.window.document.querySelector('.carousel')?.hasAttribute('hidden')).toBe(false)
+    expect(
+      resumedDom.window.document.querySelector('.carousel-image')?.getAttribute('src')
+    ).toContain('second-preview.jpg')
+    resumedDom.window.close()
   })
 })

@@ -11,6 +11,7 @@ import { runCache } from './cache.js'
 import { FanboxExtractor } from './extractor/fanbox.js'
 import { fileName, saveCookies } from './saveCookies.js'
 import { oraPromise } from 'ora'
+import open from 'open'
 const cacheDir = path.resolve('./playwright-cache')
 
 import { clearInterval } from 'node:timers'
@@ -91,8 +92,15 @@ export type ExtractorCliOptions = {
   updateMode: boolean
 }
 
-async function generateDefaultGallery(dirPath: string) {
-  return generateGalleryHtml(dirPath)
+async function generateDefaultGallery(dirPath: string): Promise<string> {
+  const outputHtmlFile = generateGalleryHtml(dirPath)
+  console.log(`Gallery generated: ${outputHtmlFile}`)
+  try {
+    await open(outputHtmlFile)
+  } catch (error) {
+    console.error('Failed to open gallery using the default app:', error)
+  }
+  return outputHtmlFile
 }
 
 function prepareDir(dirName: string, updateMode: boolean) {

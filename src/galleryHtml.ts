@@ -1,6 +1,10 @@
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { marked } from 'marked'
+
+const require = createRequire(import.meta.url)
+const panzoomScript = fs.readFileSync(require.resolve('@panzoom/panzoom'), 'utf8')
 
 const escapeHtml = (value: string) =>
   value.replace(/[&<>'"]/g, (character) => {
@@ -95,15 +99,18 @@ const feedStyles = `
   .post-content code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .carousel { position: fixed; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; margin: 0; padding: 0; border: 0; background: rgba(0, 0, 0, .96); }
   .carousel[hidden] { display: none; }
-  .carousel-image { display: block; width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh; object-fit: contain; }
-  .carousel-button { position: absolute; z-index: 1; min-width: 44px; min-height: 44px; border: 0; border-radius: 50%; background: rgba(239, 243, 244, .18); color: #fff; cursor: pointer; font-size: 30px; }
-  .carousel-close { position: absolute; top: 16px; right: 16px; }
+  .carousel-image-viewport { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; touch-action: none; }
+  .carousel-image { display: block; width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh; cursor: grab; object-fit: contain; }
+  .carousel-image:active { cursor: grabbing; }
+  .carousel-header-toolbar { position: absolute; top: 16px; right: 16px; z-index: 1; display: flex; align-items: center; gap: 8px; }
+  .carousel-header-toolbar .carousel-button { position: static; }
+  .carousel-close { font-size: 36px; }
   .carousel-previous { left: 16px; }
   .carousel-next { right: 16px; }
   .carousel-toolbar-zone { position: absolute; bottom: 0; left: 0; z-index: 1; display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 96px; padding-bottom: 16px; }
   .carousel-toolbar { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 6px 12px; border-radius: 22px; background: rgba(22, 24, 28, .92); color: #e7e9ea; opacity: 0; transition: opacity 180ms ease 1s; }
   .carousel-counter { font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .carousel-copy-path { min-height: 32px; border: 0; border-radius: 16px; padding: 0 12px; background: #1d9bf0; color: #fff; cursor: pointer; font: inherit; white-space: nowrap; }
+  .carousel-bookmark, .carousel-copy-path { min-height: 32px; border: 0; border-radius: 16px; padding: 0 12px; background: #1d9bf0; color: #fff; cursor: pointer; font: inherit; white-space: nowrap; }
   .carousel-toolbar-zone:hover .carousel-toolbar, .carousel-toolbar:focus-within { opacity: 1; transition-delay: 0s; }
   @media (max-width: 800px) { .timeline { width: 100%; border: 0; } .post { padding-inline: 12px; } [photo-scrubber] { display: none; } }
 `
@@ -172,17 +179,22 @@ export function generateGalleryHtml(markdownDir: string): string {
   </div>
   ${scrubber}
   <div class="carousel" role="dialog" aria-modal="true" aria-label="Image carousel" hidden>
-    <button class="carousel-button carousel-close" type="button" aria-label="Close image carousel">×</button>
-    <button class="carousel-button carousel-previous" type="button" aria-label="Previous image">‹</button>
-    <img class="carousel-image" alt="">
-    <button class="carousel-button carousel-next" type="button" aria-label="Next image">›</button>
+    <div class="carousel-header-toolbar">
+      <button class="carousel-button carousel-close" type="button" aria-label="Close image carousel">×</button>
+    </div>
+    <button class="carousel-button carousel-previous" type="button" aria-label="Previous image or post">‹</button>
+    <div class="carousel-image-viewport"><img class="carousel-image" alt=""></div>
+    <button class="carousel-button carousel-next" type="button" aria-label="Next image or post">›</button>
     <div class="carousel-toolbar-zone">
       <div class="carousel-toolbar">
+        <button class="carousel-button carousel-zoom-out" type="button" aria-label="Zoom out">−</button>
         <span class="carousel-counter" aria-live="polite"></span>
+        <button class="carousel-button carousel-zoom-in" type="button" aria-label="Zoom in">+</button>
+        <button class="carousel-bookmark" type="button">Bookmark image</button>
         <button class="carousel-copy-path" type="button">Copy image path</button>
-      </div>
     </div>
   </div>
+  <script>${panzoomScript}</script>
   <script>
     const carousel = document.querySelector('.carousel')
     const carouselImage = document.querySelector('.carousel-image')
@@ -191,16 +203,46 @@ export function generateGalleryHtml(markdownDir: string): string {
     const closeButton = document.querySelector('.carousel-close')
     const counter = document.querySelector('.carousel-counter')
     const copyPathButton = document.querySelector('.carousel-copy-path')
+    const bookmarkButton = document.querySelector('.carousel-bookmark')
     const rotateFeedButton = document.querySelector('.feed-rotate')
     const feedViewport = document.querySelector('.feed-viewport')
     let images = []
     let imageIndex = 0
-
+    let postImages = []
+    let postIndex = 0
+    const zoomOutButton = document.querySelector('.carousel-zoom-out')
+    const zoomInButton = document.querySelector('.carousel-zoom-in')
     const scrubber = document.querySelector('[photo-scrubber]')
     const scrubberButtons = [...document.querySelectorAll('.scrubber-month')]
+    const galleryBookmarkParam = 'image'
+    const persistViewedImage = () => {
+      const imageSource = images[imageIndex]?.getAttribute('src')
+      if (!imageSource) return
+      const bookmark = '#' + galleryBookmarkParam + '=' + encodeURIComponent(imageSource)
+      try {
+        history.replaceState(null, '', bookmark)
+      } catch {
+        location.hash = bookmark
+      }
+    }
+    const bookmarkCurrentImage = () => {
+      persistViewedImage()
+      bookmarkButton.textContent = 'Bookmarked'
+    }
+    const resumeBookmarkedImage = () => {
+      const imageSource = new URLSearchParams(location.hash.slice(1)).get(galleryBookmarkParam)
+      if (!imageSource) return
+      const image = [...document.querySelectorAll('.post-content img')].find(
+        (candidate) => candidate.getAttribute('src') === imageSource
+      )
+      if (!image) return
+      image.closest('.post')?.scrollIntoView({ block: 'center' })
+      openCarousel(image)
+    }
     const jumpToMonth = (button) => {
       document.getElementById(button.dataset.target)?.scrollIntoView({ block: 'start' })
     }
+    const panzoom = Panzoom(carouselImage, { maxScale: 5, minScale: 1 })
     if (scrubber) {
       scrubber.addEventListener('click', (event) => {
         const button = event.target instanceof Element ? event.target.closest('.scrubber-month') : null
@@ -233,10 +275,14 @@ export function generateGalleryHtml(markdownDir: string): string {
       const image = images[imageIndex]
       carouselImage.src = image.currentSrc || image.src
       carouselImage.alt = image.alt
-      previousButton.hidden = images.length < 2
-      nextButton.hidden = images.length < 2
+      const hasMultipleImages = postImages.length > 1 || images.length > 1
+      previousButton.hidden = !hasMultipleImages
+      nextButton.hidden = !hasMultipleImages
+      panzoom.reset({ animate: false })
       counter.textContent = String(imageIndex + 1) + ' / ' + images.length
       copyPathButton.textContent = 'Copy image path'
+      persistViewedImage()
+      bookmarkButton.textContent = 'Bookmark image'
     }
 
     const closeCarousel = () => {
@@ -271,12 +317,28 @@ export function generateGalleryHtml(markdownDir: string): string {
     }
 
     const openCarousel = (image) => {
-      images = [...image.closest('.post').querySelectorAll('.post-content img')]
+      postImages = [...document.querySelectorAll('.post')].map((post) => [...post.querySelectorAll('.post-content img')]).filter((post) => post.length > 0)
+      postIndex = postImages.findIndex((post) => post.includes(image))
+      images = postImages[postIndex]
       imageIndex = images.indexOf(image)
       carousel.hidden = false
       document.body.style.overflow = 'hidden'
       renderImage()
       closeButton.focus()
+    }
+
+    const showPostImage = (offset) => {
+      imageIndex += offset
+      if (imageIndex < 0) {
+        postIndex = (postIndex - 1 + postImages.length) % postImages.length
+        images = postImages[postIndex]
+        imageIndex = images.length - 1
+      } else if (imageIndex === images.length) {
+        postIndex = (postIndex + 1) % postImages.length
+        images = postImages[postIndex]
+        imageIndex = 0
+      }
+      renderImage()
     }
     rotateFeedButton.addEventListener('click', () => {
       const rotated = feedViewport.classList.toggle('is-rotated')
@@ -290,20 +352,23 @@ export function generateGalleryHtml(markdownDir: string): string {
     })
     closeButton.addEventListener('click', closeCarousel)
     copyPathButton.addEventListener('click', copyImagePath)
-    previousButton.addEventListener('click', () => {
-      imageIndex = (imageIndex - 1 + images.length) % images.length
-      renderImage()
-    })
-    nextButton.addEventListener('click', () => {
-      imageIndex = (imageIndex + 1) % images.length
-      renderImage()
-    })
+    bookmarkButton.addEventListener('click', bookmarkCurrentImage)
+    zoomOutButton.addEventListener('click', () => panzoom.zoomOut())
+    zoomInButton.addEventListener('click', () => panzoom.zoomIn())
+    previousButton.addEventListener('click', () => showPostImage(-1))
+    nextButton.addEventListener('click', () => showPostImage(1))
+    carousel.addEventListener('wheel', (event) => {
+      if (carousel.hidden) return
+      event.preventDefault()
+      panzoom.zoomWithWheel(event)
+    }, { passive: false })
     document.addEventListener('keydown', (event) => {
       if (carousel.hidden) return
       if (event.key === 'Escape') closeCarousel()
       if (event.key === 'ArrowLeft') previousButton.click()
       if (event.key === 'ArrowRight') nextButton.click()
     })
+    resumeBookmarkedImage()
   </script>
 </body>
 </html>`

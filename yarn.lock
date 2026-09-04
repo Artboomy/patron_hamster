@@ -1392,6 +1392,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@panzoom/panzoom@npm:4.6.2":
+  version: 4.6.2
+  resolution: "@panzoom/panzoom@npm:4.6.2"
+  checksum: 10c0/a113d1a16c7a97bafbe3cf94aeb2d38e80492e3415d1a3fb68576d5f039bcdf28872ef6a28509168d063b619e51d82f6b4f2e8723068d764b38d169a178ac110
+  languageName: node
+  linkType: hard
+
 "@photostructure/tz-lookup@npm:^11.1.0":
   version: 11.1.0
   resolution: "@photostructure/tz-lookup@npm:11.1.0"
@@ -6814,6 +6821,7 @@ __metadata:
     "@eslint/js": "npm:^9.20.0"
     "@ladle/react": "npm:^5.0.3"
     "@mui/material": "npm:^7.3.2"
+    "@panzoom/panzoom": "npm:4.6.2"
     "@playwright/test": "npm:1.51.0"
     "@testing-library/dom": "npm:^10.4.1"
     "@testing-library/jest-dom": "npm:^6.8.0"
