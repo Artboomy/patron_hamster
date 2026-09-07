@@ -1,6 +1,6 @@
 import { Extractor } from '../extractor.js'
 import type { ScraperPage } from './pageTypes.js'
-import { downloadFile, linkToBuffer } from './utils.js'
+import { createDownloadProgressReporter, downloadFile, linkToBuffer } from './utils.js'
 import ora from 'ora'
 
 function parseFormattedDate(dateString: string) {
@@ -96,7 +96,12 @@ export class FanboxExtractor extends Extractor {
       const spinner = ora(`Saving ${url}`).start()
       imageIdToName[imageId] = this.checker(imageId) || ''
       if (!imageIdToName[imageId]) {
-        const img = await linkToBuffer(page, url)
+        const img = await linkToBuffer(
+          page,
+          url,
+          5,
+          createDownloadProgressReporter(spinner, 'Saving image')
+        )
         imageIdToName[imageId] = await downloadFile(
           url,
           outDir,

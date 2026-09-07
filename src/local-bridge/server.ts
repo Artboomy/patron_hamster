@@ -79,6 +79,11 @@ type WorkerResult = {
     actionPayload?: unknown;
   };
 };
+type DownloadProgress = {
+  downloadedBytes: number;
+  totalBytes?: number;
+};
+
 
 type BrokerDiagnostics = {
   queueDepth: number;
@@ -101,6 +106,8 @@ const commandQueue: BridgeRequest[] = [];
 const inflightRequestIds = new Set<string>();
 const claimWaiters: ClaimWaiter[] = [];
 const activeSockets = new Set<Socket>();
+const progressByRequestId = new Map<string, DownloadProgress>();
+
 
 let claimedCount = 0;
 let timeoutCount = 0;
@@ -278,6 +285,8 @@ async function enqueueAndAwaitResult(request: BridgeRequest): Promise<BridgeResp
       pendingRequests.delete(request.requestId);
       inflightRequestIds.delete(request.requestId);
       dequeueRequestById(request.requestId);
+      progressByRequestId.delete(request.requestId);
+
       timeoutCount += 1;
 
       resolve(
@@ -383,6 +392,8 @@ function resolveWithWorkerResult(result: WorkerResult): { statusCode: number; bo
   pendingRequests.delete(result.requestId);
   inflightRequestIds.delete(result.requestId);
   dequeueRequestById(result.requestId);
+  progressByRequestId.delete(result.requestId);
+
   clearTimeout(pending.timeoutHandle);
 
   if (result.ok) {
@@ -560,6 +571,56 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+  }
+
+  if (req.method === 'POST' && pathname === '/v2/worker/progress') {
+    try {
+      const body = (await readJsonBody(req)) as {
+        requestId?: unknown;
+        downloadedBytes?: unknown;
+        totalBytes?: unknown;
+      };
+      const requestId = typeof body.requestId === 'string' ? body.requestId : '';
+      const downloadedBytes = body.downloadedBytes;
+      const totalBytes = body.totalBytes;
+      if (
+        !requestId ||
+        !pendingRequests.has(requestId) ||
+        typeof downloadedBytes !== 'number' ||
+        !Number.isSafeInteger(downloadedBytes) ||
+        downloadedBytes < 0 ||
+        (totalBytes !== undefined &&
+          (typeof totalBytes !== 'number' ||
+            !Number.isSafeInteger(totalBytes) ||
+            totalBytes < downloadedBytes))
+      ) {
+        sendJson(res, 400, {
+          ok: false,
+          error: createError('BAD_REQUEST', 'Invalid download progress payload', false)
+        });
+        return;
+      }
+      progressByRequestId.set(requestId, {
+        downloadedBytes,
+        ...(typeof totalBytes === 'number' ? { totalBytes } : {})
+      });
+      sendJson(res, 200, { ok: true });
+      return;
+    } catch (error) {
+      sendJson(res, 400, {
+        ok: false,
+        error: createError('BAD_REQUEST', error instanceof Error ? error.message : 'Invalid progress payload', false)
+      });
+      return;
+    }
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/v2/request-progress/')) {
+    const requestId = decodeURIComponent(pathname.replace('/v2/request-progress/', ''));
+    sendJson(res, 200, {
+      progress: progressByRequestId.get(requestId) ?? null
+    });
+    return;
   }
 
   if (req.method === 'POST' && pathname === '/v2/worker/heartbeat') {

@@ -4,7 +4,12 @@ import ora from 'ora'
 import TurndownService from 'turndown'
 import type { ExtractorCliOptions } from '../index.js'
 import { getFileChecker, waitForDelay, waitForEnter } from '../utils.js'
-import { downloadFile, linkToBuffer, resolveOutputFilePath } from './utils.js'
+import {
+  createDownloadProgressReporter,
+  downloadFile,
+  linkToBuffer,
+  resolveOutputFilePath
+} from './utils.js'
 import type { ScraperContext, ScraperPage } from './pageTypes.js'
 
 const PHOTO_LINK_SELECTOR =
@@ -350,7 +355,12 @@ ${content}`
       const imageUrl = originalImageUrl(image.imageUrl)
       const spinner = ora(`Saving ${imageUrl}`).start()
       try {
-        const buffer = await linkToBuffer(this.page, imageUrl)
+        const buffer = await linkToBuffer(
+          this.page,
+          imageUrl,
+          5,
+          createDownloadProgressReporter(spinner, 'Saving image')
+        )
         const saved = await downloadFile(
           imageUrl,
           outputPath,

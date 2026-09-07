@@ -1,6 +1,7 @@
 import { BridgeV2Runtime } from './bridgeV2.js'
 import fs from 'node:fs'
 import type {
+  DownloadProgress,
   ScraperContext,
   ScraperDownload,
   ScraperLocator,
@@ -454,8 +455,11 @@ export class BridgePageShim implements ScraperPage {
     await this.runtime.sleep(timeoutMs)
   }
 
-  async fetchAsBuffer(url: string): Promise<Buffer> {
-    const base64 = await this.runtime.fetchAsBase64(url, this.tabId)
+  async fetchAsBuffer(
+    url: string,
+    onProgress?: (progress: DownloadProgress) => void
+  ): Promise<Buffer> {
+    const base64 = await this.runtime.fetchAsBase64(url, this.tabId, onProgress)
     return Buffer.from(base64, 'base64')
   }
 
@@ -483,8 +487,8 @@ export class BridgePageShim implements ScraperPage {
     for (const imageUrl of urls) {
       const response: ScraperResponse = {
         url: () => imageUrl,
-        body: async () => {
-          const base64 = await this.runtime.fetchAsBase64(imageUrl, this.tabId)
+        body: async (onProgress) => {
+          const base64 = await this.runtime.fetchAsBase64(imageUrl, this.tabId, onProgress)
           return Buffer.from(base64, 'base64')
         }
       }

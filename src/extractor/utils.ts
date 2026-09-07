@@ -3,7 +3,8 @@ import fs from 'node:fs'
 import fetch from 'node-fetch'
 import path from 'path'
 import { exiftool } from 'exiftool-vendored'
-import type { ScraperPage } from './pageTypes.js'
+import type { Ora } from 'ora'
+import type { DownloadProgress, ScraperPage } from './pageTypes.js'
 import { imageExtensions } from '../constants.js'
 import { normalizeFileName, waitForDelay } from '../utils.js'
 
@@ -11,6 +12,32 @@ const BRIDGE_PORT = Number(process.env.BRIDGE_PORT || 17353)
 const BRIDGE_HOST = process.env.BRIDGE_HOST || '127.0.0.1'
 const BRIDGE_BASE_URL =
   process.env.BRIDGE_BASE_URL || `http://${BRIDGE_HOST}:${BRIDGE_PORT}`
+
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`
+  }
+  const units = ['KiB', 'MiB', 'GiB']
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length)
+  return `${(bytes / 1024 ** exponent).toFixed(exponent === 1 ? 0 : 1)} ${units[exponent - 1]}`
+}
+
+export function createDownloadProgressReporter(spinner: Ora, label: string): (progress: DownloadProgress) => void {
+  spinner.spinner = { interval: 1_000, frames: [''] }
+  return ({ downloadedBytes, totalBytes }) => {
+    if (!totalBytes) {
+      spinner.text = `${label} ${formatByteSize(downloadedBytes)} downloaded`
+      return
+    }
+
+    const ratio = Math.min(downloadedBytes / totalBytes, 1)
+    const width = 20
+    const complete = Math.round(ratio * width)
+    spinner.text = `${label} [${'#'.repeat(complete)}${'-'.repeat(width - complete)}] ${Math.round(
+      ratio * 100
+    )}% ${formatByteSize(downloadedBytes)} / ${formatByteSize(totalBytes)}`
+  }
+}
 
 const hasExtension = (str: string): boolean => {
   const parts = str.split('.')
@@ -63,10 +90,13 @@ export async function downloadFile(
 export async function linkToBuffer(
   page: ScraperPage,
   fileUrl: string,
-  maxRetries = 5
+  maxRetries = 5,
+  onProgress?: (progress: DownloadProgress) => void
 ): Promise<Buffer> {
   if (typeof page.fetchAsBuffer === 'function') {
-    return page.fetchAsBuffer(fileUrl)
+    return onProgress
+      ? page.fetchAsBuffer(fileUrl, onProgress)
+      : page.fetchAsBuffer(fileUrl)
   }
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {

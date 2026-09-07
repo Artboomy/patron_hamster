@@ -4,13 +4,18 @@ export type WaitForSelectorState =
   | 'visible'
   | 'hidden'
 
+export type DownloadProgress = {
+  downloadedBytes: number
+  totalBytes?: number
+}
+
 export interface ScraperDownload {
   saveAs(filePath: string): Promise<void>
 }
 
 export interface ScraperResponse {
   url(): string
-  body(): Promise<Buffer>
+  body(onProgress?: (progress: DownloadProgress) => void): Promise<Buffer>
 }
 
 export interface ScraperMouse {
@@ -76,7 +81,7 @@ export interface ScraperPage {
   off(event: 'response', listener: (response: ScraperResponse) => void): void
   waitForEvent(event: 'download'): Promise<ScraperDownload>
   waitForTimeout(timeoutMs: number): Promise<void>
-  fetchAsBuffer?(url: string): Promise<Buffer>
+  fetchAsBuffer?(url: string, onProgress?: (progress: DownloadProgress) => void): Promise<Buffer>
   mouse: ScraperMouse
   expectUrl?(url: string): void
 }

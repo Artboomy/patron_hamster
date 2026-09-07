@@ -20,6 +20,7 @@ import type { ExtractorCliOptions } from './index.js'
 import TurndownService from 'turndown'
 import { StoredCookies } from './extractor/types.js'
 import {
+  createDownloadProgressReporter,
   downloadFile,
   linkToBuffer,
   resolveOutputFilePath,
@@ -90,6 +91,8 @@ export function imageHook(cfg: {
     ) {
       try {
         const spinner = ora(`Saving image ${url}`).start()
+        const reportProgress = createDownloadProgressReporter(spinner, 'Saving image')
+
         const imageId = getImageId(url)
         if (savedImages[imageId]) {
           spinner.succeed(`Already saved ${imageId}, skipping`)
@@ -102,7 +105,7 @@ export function imageHook(cfg: {
           imageIdToName[imageId] = foundName
           return
         }
-        const buffer = await response.body() // Get image data
+        const buffer = await response.body(reportProgress) // Get image data
         if (buffer.length) {
           const { ext, mime } = await fileTypeFromBuffer(buffer).then(
             (i) => i || { ext: 'file', mime: 'unknown' }
@@ -536,7 +539,13 @@ export class Extractor {
         const imageId = url.split('?')[0].split('/').at(-3) as string
         imageIdToName[imageId] = checkFileExists(imageId) || ''
         if (!imageIdToName[imageId]) {
-          const img = await linkToBuffer(page, url)
+          const spinner = ora(`Saving image ${url}`).start()
+          const img = await linkToBuffer(
+            page,
+            url,
+            5,
+            createDownloadProgressReporter(spinner, 'Saving image')
+          )
           imageIdToName[imageId] = await downloadFile(
             url,
             outDir,
@@ -545,6 +554,7 @@ export class Extractor {
             tags,
             img
           )
+          spinner.succeed(`Saved ${imageIdToName[imageId]}`)
         } else {
           console.log(`Image ${imageId} already exists`)
         }

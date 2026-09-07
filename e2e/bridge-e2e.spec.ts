@@ -26,7 +26,11 @@ type RuntimeLike = {
     tabId?: number
   ) => Promise<void>
   evaluate: <T = unknown>(expression: string, args?: unknown[], tabId?: number) => Promise<T>
-  fetchAsBase64: (url: string, tabId?: number) => Promise<string>
+  fetchAsBase64: (
+    url: string,
+    tabId?: number,
+    onProgress?: (progress: { downloadedBytes: number; totalBytes?: number }) => void
+  ) => Promise<string>
   dispose: () => Promise<void>
 }
 
@@ -311,10 +315,16 @@ test.describe('Bridge E2E', () => {
           )
         ).rejects.toThrow(/Failed to fetch/)
 
-        const base64 = await runtime!.fetchAsBase64(imageUrl, tabId as number)
+        const progressUpdates: Array<{ downloadedBytes: number; totalBytes?: number }> = []
+        const base64 = await runtime!.fetchAsBase64(
+          `${imageUrl}?progress=1`,
+          tabId as number,
+          (progress) => progressUpdates.push(progress)
+        )
         const decoded = Buffer.from(base64, 'base64')
         const expected = fs.readFileSync(mockServer.fixtureImagePath)
         expect(decoded.equals(expected)).toBe(true)
+        expect(progressUpdates.some(({ totalBytes }) => totalBytes === expected.length)).toBe(true)
       })
 
       await test.step('Assert: triggered download saves the fixture image', async () => {

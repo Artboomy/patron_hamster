@@ -58,6 +58,17 @@ export async function startMockSiteServer(): Promise<MockSiteServer> {
     }
     const url = new URL(req.url, 'http://127.0.0.1')
     if (url.pathname === protectedAssetPath || url.pathname === '/assets/sample.png') {
+      if (url.searchParams.has('progress')) {
+        const midpoint = Math.ceil(imageBuffer.length / 2)
+        res.statusCode = 200
+        res.setHeader('content-type', 'image/png')
+        res.setHeader('content-length', imageBuffer.length)
+        res.write(imageBuffer.subarray(0, midpoint))
+        setTimeout(() => {
+          res.end(imageBuffer.subarray(midpoint))
+        }, 300)
+        return
+      }
       send(res, 200, imageBuffer, 'image/png')
       return
     }

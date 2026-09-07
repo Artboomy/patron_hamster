@@ -7,7 +7,7 @@ import {
   waitForDelay,
   waitForObjLen
 } from '../utils.js'
-import { downloadFile, linkToBuffer } from './utils.js'
+import { createDownloadProgressReporter, downloadFile, linkToBuffer } from './utils.js'
 
 export class SubstackExtractor extends Extractor {
   site = 'substack' as const
@@ -132,7 +132,12 @@ export class SubstackExtractor extends Extractor {
       const spinner = ora(`Saving ${url}`).start()
       imageIdToName[imageId] = this.checker(imageId) || ''
       if (!imageIdToName[imageId]) {
-        const img = await linkToBuffer(page, url)
+        const img = await linkToBuffer(
+          page,
+          url,
+          5,
+          createDownloadProgressReporter(spinner, 'Saving image')
+        )
         imageIdToName[imageId] = await downloadFile(
           url,
           outDir,

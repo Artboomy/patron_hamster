@@ -56,6 +56,10 @@ function workerClaimUrl(): string {
 function workerResultUrl(): string {
   return `${LOCAL_BRIDGE_ORIGIN}/v2/worker/result`;
 }
+function workerProgressUrl(): string {
+  return `${LOCAL_BRIDGE_ORIGIN}/v2/worker/progress`;
+}
+
 
 function workerHeartbeatUrl(): string {
   return `${LOCAL_BRIDGE_ORIGIN}/v2/worker/heartbeat`;
@@ -214,7 +218,10 @@ async function fetchResizeImage(url: string): Promise<{
     bitmap.close();
   }
 }
-async function fetchBinaryAsBase64(url: string): Promise<{
+async function fetchBinaryAsBase64(
+  url: string,
+  requestId: string
+): Promise<{
   base64: string;
   mimeType: string;
 }> {
@@ -230,11 +237,59 @@ async function fetchBinaryAsBase64(url: string): Promise<{
     });
   }
 
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  const contentLength = Number(response.headers.get('content-length'));
+  const totalBytes =
+    !response.headers.has('content-encoding') &&
+    Number.isSafeInteger(contentLength) &&
+    contentLength > 0
+      ? contentLength
+      : undefined;
+  const chunks: Uint8Array[] = [];
+  let downloadedBytes = 0;
+  let lastReportedBytes = 0;
+  let lastReportedAt = 0;
+  const reader = response.body?.getReader();
+
+  await reportWorkerProgress(requestId, downloadedBytes, totalBytes);
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+
+      chunks.push(value);
+      downloadedBytes += value.byteLength;
+      const now = Date.now();
+      if (
+        downloadedBytes - lastReportedBytes >= 256 * 1024 ||
+        now - lastReportedAt >= 250
+      ) {
+        await reportWorkerProgress(requestId, downloadedBytes, totalBytes);
+        lastReportedBytes = downloadedBytes;
+        lastReportedAt = now;
+      }
+    }
+  } else {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    chunks.push(bytes);
+    downloadedBytes = bytes.byteLength;
+  }
+  await reportWorkerProgress(requestId, downloadedBytes, totalBytes);
+
+  const bytes = new Uint8Array(downloadedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   let binary = '';
   const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    const chunk = bytes.subarray(offset, offset + chunkSize);
+  for (let binaryOffset = 0; binaryOffset < bytes.length; binaryOffset += chunkSize) {
+    const chunk = bytes.subarray(binaryOffset, binaryOffset + chunkSize);
     binary += String.fromCharCode(...chunk);
   }
 
@@ -412,6 +467,21 @@ async function fetchJson(url: string, body: unknown, timeoutMs: number): Promise
     throw normalizeBridgeError(error);
   } finally {
     clearTimeout(timeoutHandle);
+  }
+}
+async function reportWorkerProgress(
+  requestId: string,
+  downloadedBytes: number,
+  totalBytes: number | undefined
+): Promise<void> {
+  try {
+    await fetchJson(
+      workerProgressUrl(),
+      { workerId, requestId, downloadedBytes, totalBytes },
+      HEALTH_CHECK_TIMEOUT_MS
+    );
+  } catch {
+    // Progress reporting is best-effort; it must not interrupt image saving.
   }
 }
 
@@ -671,7 +741,7 @@ async function executeAction(request: BridgeRequest): Promise<{ result?: unknown
       throw createBridgeError('INVALID_PAYLOAD', 'fetchBinary expects payload.url', false, payload);
     }
 
-    const fetched = await fetchBinaryAsBase64(url);
+    const fetched = await fetchBinaryAsBase64(url, request.requestId);
     return {
       result: fetched,
       meta: {

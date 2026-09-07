@@ -18,6 +18,11 @@ type BridgeResponse<TResult = unknown> = {
   result?: TResult
   error?: BridgeError
 }
+export type BridgeDownloadProgress = {
+  downloadedBytes: number
+  totalBytes?: number
+}
+
 
 export class BridgeActionError extends Error {
   action: string
@@ -66,6 +71,8 @@ function createRequestId(prefix: string): string {
 }
 
 const DOM_ACTION_TIMEOUT_MS = 12_000
+const IMAGE_FETCH_TIMEOUT_MS = 120_000
+
 const DOM_ACTION_POLL_MS = 150
 
 function isAboutBlank(url: string): boolean {
@@ -221,7 +228,8 @@ export class BridgeV2Runtime {
   async sendRequest<TResult = unknown>(
     action: string,
     payload: Record<string, unknown>,
-    timeoutMs = 30_000
+    timeoutMs = 30_000,
+    onProgress?: (progress: BridgeDownloadProgress) => void
   ): Promise<TResult> {
     const requestId = createRequestId(`req_${action}`)
     const request = {
@@ -233,38 +241,65 @@ export class BridgeV2Runtime {
       sentAt: new Date().toISOString()
     }
     this.appendTrace({ phase: 'request', request })
-    const response = await fetch(`${BRIDGE_BASE_URL}/v1/message`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(request)
-    })
-    const responseText = await response.text()
-    this.appendTrace({
-      phase: 'response',
-      action,
-      requestId,
-      httpStatus: response.status,
-      body: responseText
-    })
-    if (!response.ok) {
-      throw new BridgeActionError({
+    let pollProgress = Boolean(onProgress)
+    const progressPoller = onProgress
+      ? (async () => {
+          while (pollProgress) {
+            try {
+              const progressResponse = await fetch(
+                `${BRIDGE_BASE_URL}/v2/request-progress/${encodeURIComponent(requestId)}`
+              )
+              const { progress } = (await progressResponse.json()) as {
+                progress?: BridgeDownloadProgress | null
+              }
+              if (progress) {
+                onProgress(progress)
+              }
+            } catch {
+              // Progress is optional; the bridge request remains authoritative.
+            }
+            await waitForDelay(100)
+          }
+        })()
+      : null
+
+    try {
+      const response = await fetch(`${BRIDGE_BASE_URL}/v1/message`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request)
+      })
+      const responseText = await response.text()
+      this.appendTrace({
+        phase: 'response',
         action,
         requestId,
-        code: 'HTTP_ERROR',
-        message: `HTTP ${response.status}${responseText ? ` body=${responseText}` : ''}`
+        httpStatus: response.status,
+        body: responseText
       })
+      if (!response.ok) {
+        throw new BridgeActionError({
+          action,
+          requestId,
+          code: 'HTTP_ERROR',
+          message: `HTTP ${response.status}${responseText ? ` body=${responseText}` : ''}`
+        })
+      }
+      const body = JSON.parse(responseText) as BridgeResponse<TResult>
+      if (!body.ok) {
+        throw new BridgeActionError({
+          action,
+          requestId: body.requestId || requestId,
+          code: body.error?.code ?? 'UNKNOWN',
+          message: body.error?.message ?? 'Unknown bridge error',
+          details: body.error?.details
+        })
+      }
+      return body.result as TResult
+    } finally {
+      pollProgress = false
+      await progressPoller
     }
-    const body = JSON.parse(responseText) as BridgeResponse<TResult>
-    if (!body.ok) {
-      throw new BridgeActionError({
-        action,
-        requestId: body.requestId || requestId,
-        code: body.error?.code ?? 'UNKNOWN',
-        message: body.error?.message ?? 'Unknown bridge error',
-        details: body.error?.details
-      })
-    }
-    return body.result as TResult
   }
 
   async ping(): Promise<void> {
@@ -532,11 +567,18 @@ export class BridgeV2Runtime {
     await this.sendRequest('sleep', { durationMs })
   }
 
-  async fetchAsBase64(url: string, tabId?: number): Promise<string> {
+  async fetchAsBase64(
+    url: string,
+    tabId?: number,
+    onProgress?: (progress: BridgeDownloadProgress) => void
+  ): Promise<string> {
     void tabId
-    const result = await this.sendRequest<{ base64: string }>('fetchBinary', {
-      url
-    })
+    const result = await this.sendRequest<{ base64: string }>(
+      'fetchBinary',
+      { url },
+      IMAGE_FETCH_TIMEOUT_MS,
+      onProgress
+    )
     return result.base64
   }
 
