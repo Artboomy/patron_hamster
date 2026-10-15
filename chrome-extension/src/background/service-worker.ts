@@ -31,6 +31,8 @@ const MAX_RECONNECT_RETRY_MS = 8_000;
 const HOT_POLL_INTERVAL_MS = 150;
 const HOT_POLL_IDLE_CUTOFF_MS = 60_000;
 const RECENT_IMAGE_MAX_DIMENSION = 400;
+const BINARY_CHUNK_SIZE = 1024 * 1024;
+const MAX_ACTIVE_BINARY_TRANSFERS = 2;
 
 let dashboardState: DashboardState = { ...DEFAULT_DASHBOARD_STATE };
 const dashboardPorts = new Set<chrome.runtime.Port>();
@@ -39,6 +41,15 @@ let workerTickInFlight = false;
 let reconnectAttempt = 0;
 let scheduledWorkerTick: number | null = null;
 let lastBridgeActivityAt = 0;
+let activeBinaryTransfers = 0;
+
+type OwnedDebuggerSession = {
+  imageRequestsBlocked: boolean;
+  releasing?: Promise<void>;
+};
+
+const debuggerSessions = new Map<number, OwnedDebuggerSession>();
+const debuggerOperations = new Map<number, Promise<void>>();
 
 const workerId =
   typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -55,9 +66,6 @@ function workerClaimUrl(): string {
 
 function workerResultUrl(): string {
   return `${LOCAL_BRIDGE_ORIGIN}/v2/worker/result`;
-}
-function workerProgressUrl(): string {
-  return `${LOCAL_BRIDGE_ORIGIN}/v2/worker/progress`;
 }
 
 
@@ -130,7 +138,7 @@ function markBridgeActivity(): void {
 }
 
 function shouldHotPoll(): boolean {
-  if (dashboardPorts.size > 0) {
+  if (dashboardPorts.size > 0 || activeBinaryTransfers > 0) {
     return true;
   }
   return Date.now() - lastBridgeActivityAt < HOT_POLL_IDLE_CUTOFF_MS;
@@ -218,85 +226,113 @@ async function fetchResizeImage(url: string): Promise<{
     bitmap.close();
   }
 }
-async function fetchBinaryAsBase64(
+async function streamBinary(
   url: string,
-  requestId: string
-): Promise<{
-  base64: string;
-  mimeType: string;
-}> {
-  const response = await fetch(url, {
-    cache: 'no-store',
-    credentials: 'include'
-  });
-  if (!response.ok) {
-    throw createBridgeError('HTTP_ERROR', `Binary fetch failed: HTTP ${response.status}`, true, {
-      status: response.status,
-      statusText: response.statusText,
-      url
-    });
+  request: BridgeRequest
+): Promise<{ downloadedBytes: number }> {
+  const timeoutMs = request.timeoutMs > 0 ? request.timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
+  const sentAt = typeof request.sentAt === 'string' ? Date.parse(request.sentAt) : request.sentAt;
+  if (!Number.isFinite(sentAt)) {
+    throw createBridgeError('INVALID_PAYLOAD', 'fetchBinary expects a valid request.sentAt timestamp', false);
+  }
+  const remainingMs = timeoutMs - Math.max(0, Date.now() - sentAt);
+  const timeoutError = createBridgeError(
+    'LOCAL_TIMEOUT',
+    `Binary transfer timed out after ${timeoutMs}ms`,
+    true,
+    { url, timeoutMs }
+  );
+  if (remainingMs <= 0) {
+    throw timeoutError;
   }
 
-  const contentLength = Number(response.headers.get('content-length'));
-  const totalBytes =
-    !response.headers.has('content-encoding') &&
-    Number.isSafeInteger(contentLength) &&
-    contentLength > 0
-      ? contentLength
-      : undefined;
-  const chunks: Uint8Array[] = [];
-  let downloadedBytes = 0;
-  let lastReportedBytes = 0;
-  let lastReportedAt = 0;
-  const reader = response.body?.getReader();
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), remainingMs);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      credentials: 'include',
+      signal: controller.signal
+    });
+    reader = response.body?.getReader();
+    if (!response.ok) {
+      throw createBridgeError('HTTP_ERROR', `Binary fetch failed: HTTP ${response.status}`, true, {
+        status: response.status,
+        statusText: response.statusText,
+        url
+      });
+    }
 
-  await reportWorkerProgress(requestId, downloadedBytes, totalBytes);
-  if (reader) {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+    const rawContentLength = response.headers.get('content-length');
+    const contentLength = rawContentLength === null ? NaN : Number(rawContentLength);
+    if (!reader && contentLength > 0) {
+      throw createBridgeError('HTTP_ERROR', 'Binary fetch returned no body for a nonempty response', true, {
+        url,
+        contentLength
+      });
+    }
+    const headers: Record<string, string> = { 'content-type': 'application/octet-stream' };
+    if (
+      !response.headers.has('content-encoding') &&
+      rawContentLength !== null &&
+      /^\d+$/.test(rawContentLength) &&
+      Number.isSafeInteger(contentLength) &&
+      contentLength >= 0
+    ) {
+      headers['x-total-bytes'] = String(contentLength);
+    }
+    const uploadUrl = `${LOCAL_BRIDGE_ORIGIN}/v2/worker/binary/${encodeURIComponent(request.requestId)}`;
+    const uploadChunk = async (chunk: Uint8Array): Promise<void> => {
+      const uploaded = await fetch(uploadUrl, {
+        method: 'POST',
+        headers,
+        body: chunk as Uint8Array<ArrayBuffer>,
+        signal: controller.signal
+      });
+      if (!uploaded.ok) {
+        throw createBridgeError('HTTP_ERROR', `Binary upload failed: HTTP ${uploaded.status}`, true, {
+          status: uploaded.status,
+          requestId: request.requestId
+        });
       }
-      if (!value) {
-        continue;
+      const acknowledgement = (await uploaded.json()) as { ok?: boolean };
+      if (acknowledgement.ok !== true) {
+        throw createBridgeError('HTTP_ERROR', 'Binary upload was not acknowledged', true, {
+          requestId: request.requestId
+        });
       }
+    };
 
-      chunks.push(value);
-      downloadedBytes += value.byteLength;
-      const now = Date.now();
-      if (
-        downloadedBytes - lastReportedBytes >= 256 * 1024 ||
-        now - lastReportedAt >= 250
-      ) {
-        await reportWorkerProgress(requestId, downloadedBytes, totalBytes);
-        lastReportedBytes = downloadedBytes;
-        lastReportedAt = now;
+    let downloadedBytes = 0;
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (let offset = 0; offset < value.byteLength; offset += BINARY_CHUNK_SIZE) {
+          const chunk = value.subarray(offset, offset + BINARY_CHUNK_SIZE);
+          await uploadChunk(chunk);
+          downloadedBytes += chunk.byteLength;
+        }
       }
     }
-  } else {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    chunks.push(bytes);
-    downloadedBytes = bytes.byteLength;
+    if (downloadedBytes === 0) {
+      await uploadChunk(new Uint8Array(0));
+    }
+    return { downloadedBytes };
+  } catch (error) {
+    const timedOut = controller.signal.aborted;
+    controller.abort();
+    if (reader) {
+      await reader.cancel().catch(() => {
+        // Aborting the fetch may already have errored its reader.
+      });
+    }
+    throw timedOut ? timeoutError : error;
+  } finally {
+    clearTimeout(timeoutHandle);
+    reader?.releaseLock();
   }
-  await reportWorkerProgress(requestId, downloadedBytes, totalBytes);
-
-  const bytes = new Uint8Array(downloadedBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let binaryOffset = 0; binaryOffset < bytes.length; binaryOffset += chunkSize) {
-    const chunk = bytes.subarray(binaryOffset, binaryOffset + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-
-  return {
-    base64: btoa(binary),
-    mimeType: response.headers.get('content-type') ?? 'application/octet-stream'
-  };
 }
 
 async function uploadRecentImage(
@@ -469,21 +505,6 @@ async function fetchJson(url: string, body: unknown, timeoutMs: number): Promise
     clearTimeout(timeoutHandle);
   }
 }
-async function reportWorkerProgress(
-  requestId: string,
-  downloadedBytes: number,
-  totalBytes: number | undefined
-): Promise<void> {
-  try {
-    await fetchJson(
-      workerProgressUrl(),
-      { workerId, requestId, downloadedBytes, totalBytes },
-      HEALTH_CHECK_TIMEOUT_MS
-    );
-  } catch {
-    // Progress reporting is best-effort; it must not interrupt image saving.
-  }
-}
 
 async function verifyLocalBridge(): Promise<void> {
   const wasConnected = dashboardState.canExecuteCommands;
@@ -547,49 +568,204 @@ function createDebuggerExpression(expression: string, args: unknown[]): string {
   })()`;
 }
 
+// Serialize session ownership changes with DOM evaluation, but never queue
+// Fetch.requestPaused handling behind an evaluation that may await network work.
+async function withTabDebugger<T>(tabId: number, operation: () => Promise<T>): Promise<T> {
+  const pending = (debuggerOperations.get(tabId) ?? Promise.resolve()).then(operation);
+  const settled = pending.then(() => undefined, () => undefined);
+  debuggerOperations.set(tabId, settled);
+  try {
+    return await pending;
+  } finally {
+    if (debuggerOperations.get(tabId) === settled) debuggerOperations.delete(tabId);
+  }
+}
+
+async function acquireDebuggerSession(tabId: number): Promise<OwnedDebuggerSession> {
+  const existing = debuggerSessions.get(tabId);
+  if (existing?.releasing) {
+    await existing.releasing;
+  } else if (existing) {
+    return existing;
+  }
+  // An attachment owned by another client is not ours to reuse or reconfigure.
+  await chrome.debugger.attach({ tabId }, '1.3');
+  const session: OwnedDebuggerSession = { imageRequestsBlocked: false };
+  debuggerSessions.set(tabId, session);
+  return session;
+}
+
+async function releaseDebuggerSession(tabId: number, session: OwnedDebuggerSession): Promise<void> {
+  if (debuggerSessions.get(tabId) !== session) return;
+  if (session.releasing) return session.releasing;
+  session.releasing = (async () => {
+    let disableError: unknown;
+    if (session.imageRequestsBlocked) {
+      try {
+        await chrome.debugger.sendCommand({ tabId }, 'Fetch.disable');
+        session.imageRequestsBlocked = false;
+      } catch (error) {
+        disableError = error;
+      }
+    }
+    if (debuggerSessions.get(tabId) !== session) return;
+    try {
+      // Detaching also releases paused requests if Fetch.disable failed.
+      await chrome.debugger.detach({ tabId });
+      if (debuggerSessions.get(tabId) === session) debuggerSessions.delete(tabId);
+    } catch (error) {
+      if (debuggerSessions.get(tabId) === session) {
+        throw new Error(`Cannot release debugger for tab ${tabId}: ${String(error)}${
+          disableError ? `; Fetch.disable failed: ${String(disableError)}` : ''
+        }`);
+      }
+    }
+  })();
+  try {
+    await session.releasing;
+  } finally {
+    session.releasing = undefined;
+  }
+}
+
+async function setImageRequestsBlocked(tabId: number, blocked: boolean): Promise<void> {
+  await withTabDebugger(tabId, async () => {
+    if (!blocked) {
+      const session = debuggerSessions.get(tabId);
+      if (session) await releaseDebuggerSession(tabId, session);
+      return;
+    }
+    const session = await acquireDebuggerSession(tabId);
+    if (session.imageRequestsBlocked) return;
+    session.imageRequestsBlocked = true;
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Fetch.enable', {
+        patterns: [{ resourceType: 'Image', requestStage: 'Request' }]
+      });
+    } catch (error) {
+      await releaseDebuggerSession(tabId, session);
+      throw error;
+    }
+  });
+}
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (method !== 'Fetch.requestPaused' || source.tabId === undefined || source.sessionId) return;
+  const tabId = source.tabId;
+  const session = debuggerSessions.get(tabId);
+  if (!session) return;
+  const paused = params as { requestId: string; resourceType?: string };
+  const blockImage = session.imageRequestsBlocked && paused.resourceType === 'Image';
+  void chrome.debugger.sendCommand(
+    source,
+    blockImage ? 'Fetch.failRequest' : 'Fetch.continueRequest',
+    {
+      requestId: paused.requestId,
+      ...(blockImage ? { errorReason: 'BlockedByClient' } : {})
+    }
+  ).catch(async (error) => {
+    if (debuggerSessions.get(tabId) !== session) return;
+    appendError({
+      timestamp: Date.now(),
+      code: 'IMAGE_INTERCEPTION_FAILED',
+      message: `Cannot resolve paused request in tab ${tabId}: ${String(error)}`
+    });
+    // Fail open rather than silently leave a request paused indefinitely.
+    await releaseDebuggerSession(tabId, session);
+  }).catch((error) => {
+    appendError({
+      timestamp: Date.now(),
+      code: 'DEBUGGER_RELEASE_FAILED',
+      message: String(error)
+    });
+  });
+});
+
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId === undefined) return;
+  const session = debuggerSessions.get(source.tabId);
+  appendLog({
+    timestamp: Date.now(),
+    level: 'info',
+    message: `Debugger detached from tab ${source.tabId}: ${reason}; image blocking active: ${Boolean(session?.imageRequestsBlocked)}`
+  });
+  debuggerSessions.delete(source.tabId);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  debuggerSessions.delete(tabId);
+});
+
 async function evaluateInTabViaDebugger(
   tabId: number,
   expression: string,
   args: unknown[]
 ): Promise<unknown> {
-  const debuggee: chrome.debugger.Debuggee = { tabId };
-  let attachedByThisCall = false;
-
-  try {
+  return withTabDebugger(tabId, async () => {
+    const debuggee: chrome.debugger.Debuggee = { tabId };
+    const session = await acquireDebuggerSession(tabId);
+    const objectGroup = `bridge-evaluation-${crypto.randomUUID()}`;
+    const objectIds = new Set<string>();
+    let value: unknown;
+    let cleanupError: unknown;
     try {
-      await chrome.debugger.attach(debuggee, '1.3');
-      attachedByThisCall = true;
-    } catch (error) {
-      const message = (error as Error)?.message ?? '';
-      if (!message.includes('Another debugger is already attached')) {
-        throw error;
+      const result = (await chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
+        expression: createDebuggerExpression(expression, args),
+        objectGroup,
+        returnByValue: true,
+        awaitPromise: true
+      })) as {
+        result?: { value?: unknown; objectId?: string };
+        exceptionDetails?: { text?: string; exception?: { description?: string; objectId?: string } };
+      };
+      if (result.result?.objectId) objectIds.add(result.result.objectId);
+      if (result.exceptionDetails?.exception?.objectId) {
+        objectIds.add(result.exceptionDetails.exception.objectId);
+      }
+
+      if (result.exceptionDetails) {
+        const description =
+          result.exceptionDetails.exception?.description ??
+          result.exceptionDetails.text ??
+          'Runtime.evaluate failed';
+        throw new Error(description);
+      }
+
+      value = result.result?.value ?? null;
+    } finally {
+      const recordFailure = (operation: string, error: unknown): void => {
+        cleanupError ??= error;
+        appendError({
+          timestamp: Date.now(),
+          code: 'DEBUGGER_CLEANUP_FAILED',
+          message: `${operation} failed in tab ${tabId}: ${String(error)}`
+        });
+      };
+      // returnByValue does not cover thrown exception graphs. Release both
+      // returned handles (which can be identical) and the evaluation's group.
+      for (const objectId of objectIds) {
+        try {
+          await chrome.debugger.sendCommand(debuggee, 'Runtime.releaseObject', { objectId });
+        } catch (error) {
+          if (debuggerSessions.get(tabId) === session) recordFailure('Runtime.releaseObject', error);
+        }
+      }
+      try {
+        await chrome.debugger.sendCommand(debuggee, 'Runtime.releaseObjectGroup', { objectGroup });
+      } catch (error) {
+        if (debuggerSessions.get(tabId) === session) recordFailure('Runtime.releaseObjectGroup', error);
+      }
+      if (!session.imageRequestsBlocked) {
+        try {
+          await releaseDebuggerSession(tabId, session);
+        } catch (error) {
+          recordFailure('Debugger release', error);
+        }
       }
     }
-
-    await chrome.debugger.sendCommand(debuggee, 'Runtime.enable');
-    const result = (await chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
-      expression: createDebuggerExpression(expression, args),
-      returnByValue: true,
-      awaitPromise: true
-    })) as {
-      result?: { value?: unknown };
-      exceptionDetails?: { text?: string; exception?: { description?: string } };
-    };
-
-    if (result.exceptionDetails) {
-      const description =
-        result.exceptionDetails.exception?.description ??
-        result.exceptionDetails.text ??
-        'Runtime.evaluate failed';
-      throw new Error(description);
-    }
-
-    return result.result?.value ?? null;
-  } finally {
-    if (attachedByThisCall) {
-      await chrome.debugger.detach(debuggee).catch(() => undefined);
-    }
-  }
+    if (cleanupError !== undefined) throw cleanupError;
+    return value;
+  });
 }
 
 function inferValueType(value: unknown): string {
@@ -628,6 +804,76 @@ async function executeAction(request: BridgeRequest): Promise<{ result?: unknown
         url: tab.url
       }
     };
+  }
+
+  if (request.action === 'closeTab') {
+    const tabId = payload.tabId;
+    if (typeof tabId !== 'number' || !Number.isSafeInteger(tabId) || tabId < 0) {
+      throw createBridgeError('INVALID_PAYLOAD', 'closeTab expects a nonnegative integer payload.tabId', false, payload);
+    }
+    await withTabDebugger(tabId, async () => {
+      const session = debuggerSessions.get(tabId);
+      if (session) {
+        try {
+          await releaseDebuggerSession(tabId, session);
+        } catch (error) {
+          appendError({
+            timestamp: Date.now(),
+            code: 'DEBUGGER_RELEASE_FAILED',
+            message: `Closing tab ${tabId} after debugger release failed: ${String(error)}`
+          });
+        }
+      }
+      try {
+        // Removal guarantees paused requests and debugger resources are gone,
+        // even if disabling interception or detaching above failed.
+        await chrome.tabs.remove(tabId);
+      } catch (error) {
+        // A concurrent/user close is success, but a live tab's removal error is not.
+        const tabs = await queryTabs({});
+        if (tabs.some((tab) => tab.id === tabId)) throw error;
+      }
+      debuggerSessions.delete(tabId);
+      if (dashboardState.activeTabId === tabId) updateActiveTab(null);
+    });
+    return { result: { tabId, closed: true }, meta: { tabId } };
+  }
+
+  if (request.action === 'getHeapUsage') {
+    const tabId = payload.tabId;
+    if (typeof tabId !== 'number' || !Number.isSafeInteger(tabId) || tabId < 0) {
+      throw createBridgeError('INVALID_PAYLOAD', 'getHeapUsage expects a nonnegative integer payload.tabId', false, payload);
+    }
+    const result = await withTabDebugger(tabId, async () => {
+      const tab = await getTabOrThrow(tabId);
+      const session = await acquireDebuggerSession(tabId);
+      let usage: {
+        usedSize: number;
+        totalSize: number;
+        embedderHeapUsedSize?: number;
+        backingStorageSize?: number;
+      };
+      let cleanupError: unknown;
+      try {
+        usage = (await chrome.debugger.sendCommand({ tabId }, 'Runtime.getHeapUsage')) as typeof usage;
+      } finally {
+        if (!session.imageRequestsBlocked) {
+          try {
+            await releaseDebuggerSession(tabId, session);
+          } catch (error) {
+            appendError({
+              timestamp: Date.now(),
+              code: 'DEBUGGER_RELEASE_FAILED',
+              message: `Heap measurement cleanup failed in tab ${tabId}: ${String(error)}`
+            });
+            cleanupError = error;
+          }
+        }
+      }
+      if (cleanupError !== undefined) throw cleanupError;
+      return { tabId, url: tab.url ?? '', ...usage };
+    });
+    return { result, meta: { tabId, url: result.url } };
   }
 
   if (request.action === 'navigate') {
@@ -709,6 +955,21 @@ async function executeAction(request: BridgeRequest): Promise<{ result?: unknown
     };
   }
 
+  if (request.action === 'setImageRequestsBlocked') {
+    const tabId = payload.tabId;
+    const blocked = payload.blocked;
+    if (typeof tabId !== 'number' || !Number.isInteger(tabId) || typeof blocked !== 'boolean') {
+      throw createBridgeError(
+        'INVALID_PAYLOAD',
+        'setImageRequestsBlocked expects payload.tabId and boolean payload.blocked',
+        false,
+        payload
+      );
+    }
+    await setImageRequestsBlocked(tabId, blocked);
+    return { result: { tabId, blocked }, meta: { tabId } };
+  }
+
   if (request.action === 'evaluate') {
     const tabId = Number(payload.tabId);
     const expression = typeof payload.expression === 'string' ? payload.expression : '';
@@ -741,7 +1002,7 @@ async function executeAction(request: BridgeRequest): Promise<{ result?: unknown
       throw createBridgeError('INVALID_PAYLOAD', 'fetchBinary expects payload.url', false, payload);
     }
 
-    const fetched = await fetchBinaryAsBase64(url, request.requestId);
+    const fetched = await streamBinary(url, request);
     return {
       result: fetched,
       meta: {
@@ -1033,7 +1294,7 @@ async function executeBridgeRequest(request: BridgeRequest, source: RequestSourc
       actionResult.result && typeof actionResult.result === 'object' && 'tabId' in actionResult.result
         ? Number((actionResult.result as { tabId?: unknown }).tabId)
         : NaN;
-    if (Number.isFinite(tabId)) {
+    if (Number.isFinite(tabId) && request.action !== 'closeTab' && request.action !== 'getHeapUsage') {
       updateActiveTab(tabId);
     }
 
@@ -1079,40 +1340,8 @@ async function executeBridgeRequest(request: BridgeRequest, source: RequestSourc
   }
 }
 
-async function runWorkerCycle(): Promise<void> {
-  dashboardState.lastHeartbeat = Date.now();
-  const heartbeat = (await fetchJson(workerHeartbeatUrl(), { workerId }, HEALTH_CHECK_TIMEOUT_MS)) as {
-    diagnostics?: unknown;
-  };
-  setBrokerDiagnostics(heartbeat.diagnostics);
-
-  const claimed = (await fetchJson(
-    workerClaimUrl(),
-    {
-      workerId,
-      waitMs: WORKER_POLL_WAIT_MS
-    },
-    WORKER_POLL_WAIT_MS + 2_000
-  )) as {
-    command?: BridgeRequest | null;
-    diagnostics?: unknown;
-  };
-
-  setBrokerDiagnostics(claimed.diagnostics);
-
-  const request = claimed.command;
-  if (!request) {
-    try {
-      await processSavedImageThumbnail();
-    } catch {
-      // Best-effort thumbnail processing should not break the worker loop.
-    }
-    await persistAndBroadcast();
-    return;
-  }
-
+async function completeWorkerRequest(request: BridgeRequest): Promise<void> {
   const response = await executeBridgeRequest(request, 'node-worker');
-
   const resultPayload = response.ok
     ? {
         requestId: request.requestId,
@@ -1127,10 +1356,90 @@ async function runWorkerCycle(): Promise<void> {
 
   const postResult = (await fetchJson(workerResultUrl(), resultPayload, HEALTH_CHECK_TIMEOUT_MS)) as { diagnostics?: unknown };
   setBrokerDiagnostics(postResult.diagnostics);
+  await persistAndBroadcast();
+}
+
+async function runBinaryWorkerRequest(request: BridgeRequest): Promise<void> {
+  activeBinaryTransfers += 1;
   try {
-    await processSavedImageThumbnail();
-  } catch {
-    // Best-effort thumbnail processing should not break the worker loop.
+    await completeWorkerRequest(request);
+  } catch (error) {
+    const bridgeError = normalizeBridgeError(error);
+    setReadOnlyMode('Local bridge server is unavailable.', 'degraded');
+    const process = dashboardState.runningProcesses.find((entry) => entry.requestId === request.requestId);
+    if (process) {
+      upsertProcess({ ...process, state: 'error', durationMs: Date.now() - process.startedAt });
+    }
+    appendError({
+      timestamp: Date.now(),
+      code: bridgeError.code,
+      message: bridgeError.message,
+      requestId: request.requestId,
+      source: 'node-worker'
+    });
+    appendLog({
+      timestamp: Date.now(),
+      level: 'warn',
+      message: `Binary worker degraded: ${bridgeError.message}`,
+      requestId: request.requestId,
+      source: 'node-worker'
+    });
+    await persistAndBroadcast().catch(() => {
+      // Storage failures must not leave a rejected background task or an occupied slot.
+    });
+  } finally {
+    activeBinaryTransfers -= 1;
+    markBridgeActivity();
+  }
+}
+
+async function runWorkerCycle(): Promise<void> {
+  dashboardState.lastHeartbeat = Date.now();
+  const heartbeat = (await fetchJson(workerHeartbeatUrl(), { workerId }, HEALTH_CHECK_TIMEOUT_MS)) as {
+    diagnostics?: unknown;
+  };
+  setBrokerDiagnostics(heartbeat.diagnostics);
+
+  const claimed = (await fetchJson(
+    workerClaimUrl(),
+    {
+      workerId,
+      waitMs: WORKER_POLL_WAIT_MS,
+      acceptBinary: activeBinaryTransfers < MAX_ACTIVE_BINARY_TRANSFERS
+    },
+    WORKER_POLL_WAIT_MS + 2_000
+  )) as {
+    command?: BridgeRequest | null;
+    diagnostics?: unknown;
+  };
+
+  setBrokerDiagnostics(claimed.diagnostics);
+
+  const request = claimed.command;
+  if (!request) {
+    if (activeBinaryTransfers === 0) {
+      try {
+        await processSavedImageThumbnail();
+      } catch {
+        // Best-effort thumbnail processing should not break the worker loop.
+      }
+    }
+    await persistAndBroadcast();
+    return;
+  }
+
+  if (request.action === 'fetchBinary') {
+    void runBinaryWorkerRequest(request);
+    return;
+  }
+
+  await completeWorkerRequest(request);
+  if (activeBinaryTransfers === 0) {
+    try {
+      await processSavedImageThumbnail();
+    } catch {
+      // Best-effort thumbnail processing should not break the worker loop.
+    }
   }
   await persistAndBroadcast();
 }
@@ -1160,6 +1469,9 @@ async function runWorkerTick(): Promise<void> {
         scheduleWorkerTick(delayMs);
       } else {
         reconnectAttempt = 0;
+        if (shouldHotPoll()) {
+          scheduleWorkerTick(HOT_POLL_INTERVAL_MS);
+        }
       }
       return;
     }

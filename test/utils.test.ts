@@ -1,8 +1,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { linkToBuffer, resolveOutputFilePath } from '../src/extractor/utils.js'
+import { afterEach, describe, expect, it } from 'vitest'
+import { resolveOutputFilePath } from '../src/extractor/utils.js'
 import { getFileChecker, normalizeFileName, patchLinks } from '../src/utils.js'
 
 const tempDirs: string[] = []
@@ -86,22 +86,5 @@ describe('patchLinks', () => {
 
     expect(patched).toContain('src="168038234/video.mp4"')
     expect(patched).toContain('<video controls="">')
-  })
-})
-
-describe('linkToBuffer', () => {
-  it('prefers bridge-backed buffer fetches when available', async () => {
-    const expected = Buffer.from('bridge-bytes')
-    const fetchAsBuffer = vi.fn(async () => expected)
-    const evaluate = vi.fn()
-
-    const result = await linkToBuffer({
-      fetchAsBuffer,
-      evaluate
-    } as never, 'https://files.example/video.mp4')
-
-    expect(result.equals(expected)).toBe(true)
-    expect(fetchAsBuffer).toHaveBeenCalledWith('https://files.example/video.mp4')
-    expect(evaluate).not.toHaveBeenCalled()
   })
 })

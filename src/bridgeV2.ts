@@ -62,6 +62,15 @@ type ListTabsResult = {
   }>
 }
 
+type HeapUsage = {
+  tabId: number
+  url: string
+  usedSize: number
+  totalSize: number
+  embedderHeapUsedSize?: number
+  backingStorageSize?: number
+}
+
 function waitForDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -71,7 +80,9 @@ function createRequestId(prefix: string): string {
 }
 
 const DOM_ACTION_TIMEOUT_MS = 12_000
-const IMAGE_FETCH_TIMEOUT_MS = 120_000
+const IMAGE_FETCH_TIMEOUT_MS = 600_000
+const HEAP_REPORT_INTERVAL_MS = 10_000
+const HEAP_REPORT_TIMEOUT_MS = 5_000
 
 const DOM_ACTION_POLL_MS = 150
 
@@ -86,15 +97,30 @@ function normalizeComparablePath(pathname: string): string {
   return pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
 }
 
-function expectedUrlMatches(actualUrl: string, expectedUrl: string): boolean {
+function normalizePatreonPath(host: string, pathname: string): string {
+  if (host !== 'patreon.com' && !host.endsWith('.patreon.com')) {
+    return pathname
+  }
+  const segments = pathname.split('/')
+  if (segments[1] === 'c' || segments[1] === 'cw') {
+    return `/${segments.slice(2).join('/')}`
+  }
+  return pathname
+}
+
+export function expectedUrlMatches(actualUrl: string, expectedUrl: string): boolean {
   try {
     const actual = new URL(actualUrl)
     const expected = new URL(expectedUrl)
     if (actual.host !== expected.host) {
       return false
     }
-    const actualPath = normalizeComparablePath(actual.pathname)
-    const expectedPath = normalizeComparablePath(expected.pathname)
+    const actualPath = normalizeComparablePath(
+      normalizePatreonPath(actual.host, actual.pathname)
+    )
+    const expectedPath = normalizeComparablePath(
+      normalizePatreonPath(expected.host, expected.pathname)
+    )
     if (expectedPath === '/') {
       return true
     }
@@ -116,6 +142,13 @@ export class BridgeV2Runtime {
   private expectedTabUrls = new Map<number, string>()
   private tabIdAliases = new Map<number, number>()
   private readonly traceFilePath: string | null
+  private readonly binaryTransfers = new Set<Promise<Buffer>>()
+  private readonly imageBlockedTabIds = new Set<number>()
+  private readonly imageBlockingOperations = new Set<Promise<void>>()
+  private readonly ownedTabIds = new Set<number>()
+  private readonly heapReports = new Map<number, Promise<void>>()
+  private heapReportTimer: NodeJS.Timeout | null = null
+  private disposed = false
   constructor(options?: { traceFilePath?: string }) {
     this.traceFilePath =
       typeof options?.traceFilePath === 'string' &&
@@ -133,6 +166,52 @@ export class BridgeV2Runtime {
       `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`,
       'utf8'
     )
+  }
+
+  private startHeapReporting(): void {
+    if (!this.traceFilePath || this.heapReportTimer || this.disposed) return
+    this.heapReportTimer = setInterval(() => {
+      for (const tabId of this.ownedTabIds) {
+        void this.reportHeapUsage(tabId, 'interval').catch((error) => {
+          console.warn(`Cannot write heap trace for tab ${tabId}: ${String(error)}`)
+        })
+      }
+    }, HEAP_REPORT_INTERVAL_MS)
+    this.heapReportTimer.unref()
+  }
+
+  private stopHeapReporting(): void {
+    if (this.heapReportTimer) clearInterval(this.heapReportTimer)
+    this.heapReportTimer = null
+  }
+
+  private async reportHeapUsage(tabId: number, reason: string): Promise<void> {
+    if (!this.traceFilePath) return
+    const pending = this.heapReports.get(tabId)
+    if (pending) return pending
+    const report = (async () => {
+      try {
+        const usage = await this.sendRequest<HeapUsage>(
+          'getHeapUsage',
+          { tabId },
+          HEAP_REPORT_TIMEOUT_MS
+        )
+        this.appendTrace({ phase: 'heap-usage', reason, ...usage })
+      } catch (error) {
+        this.appendTrace({
+          phase: 'heap-usage-error',
+          reason,
+          tabId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    })()
+    this.heapReports.set(tabId, report)
+    try {
+      await report
+    } finally {
+      this.heapReports.delete(tabId)
+    }
   }
 
   async inspectHealth(): Promise<{
@@ -228,8 +307,7 @@ export class BridgeV2Runtime {
   async sendRequest<TResult = unknown>(
     action: string,
     payload: Record<string, unknown>,
-    timeoutMs = 30_000,
-    onProgress?: (progress: BridgeDownloadProgress) => void
+    timeoutMs = 30_000
   ): Promise<TResult> {
     const requestId = createRequestId(`req_${action}`)
     const request = {
@@ -241,65 +319,38 @@ export class BridgeV2Runtime {
       sentAt: new Date().toISOString()
     }
     this.appendTrace({ phase: 'request', request })
-    let pollProgress = Boolean(onProgress)
-    const progressPoller = onProgress
-      ? (async () => {
-          while (pollProgress) {
-            try {
-              const progressResponse = await fetch(
-                `${BRIDGE_BASE_URL}/v2/request-progress/${encodeURIComponent(requestId)}`
-              )
-              const { progress } = (await progressResponse.json()) as {
-                progress?: BridgeDownloadProgress | null
-              }
-              if (progress) {
-                onProgress(progress)
-              }
-            } catch {
-              // Progress is optional; the bridge request remains authoritative.
-            }
-            await waitForDelay(100)
-          }
-        })()
-      : null
-
-    try {
-      const response = await fetch(`${BRIDGE_BASE_URL}/v1/message`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(request)
-      })
-      const responseText = await response.text()
-      this.appendTrace({
-        phase: 'response',
+    const response = await fetch(`${BRIDGE_BASE_URL}/v1/message`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request)
+    })
+    const responseText = await response.text()
+    this.appendTrace({
+      phase: 'response',
+      action,
+      requestId,
+      httpStatus: response.status,
+      body: responseText
+    })
+    if (!response.ok) {
+      throw new BridgeActionError({
         action,
         requestId,
-        httpStatus: response.status,
-        body: responseText
+        code: 'HTTP_ERROR',
+        message: `HTTP ${response.status}${responseText ? ` body=${responseText}` : ''}`
       })
-      if (!response.ok) {
-        throw new BridgeActionError({
-          action,
-          requestId,
-          code: 'HTTP_ERROR',
-          message: `HTTP ${response.status}${responseText ? ` body=${responseText}` : ''}`
-        })
-      }
-      const body = JSON.parse(responseText) as BridgeResponse<TResult>
-      if (!body.ok) {
-        throw new BridgeActionError({
-          action,
-          requestId: body.requestId || requestId,
-          code: body.error?.code ?? 'UNKNOWN',
-          message: body.error?.message ?? 'Unknown bridge error',
-          details: body.error?.details
-        })
-      }
-      return body.result as TResult
-    } finally {
-      pollProgress = false
-      await progressPoller
     }
+    const body = JSON.parse(responseText) as BridgeResponse<TResult>
+    if (!body.ok) {
+      throw new BridgeActionError({
+        action,
+        requestId: body.requestId || requestId,
+        code: body.error?.code ?? 'UNKNOWN',
+        message: body.error?.message ?? 'Unknown bridge error',
+        details: body.error?.details
+      })
+    }
+    return body.result as TResult
   }
 
   async ping(): Promise<void> {
@@ -314,7 +365,10 @@ export class BridgeV2Runtime {
   }
 
   async openTab(url: string, active = true): Promise<{ tabId: number }> {
+    if (this.disposed) throw new Error('Bridge runtime is disposed')
     const opened = await this.sendRequest<{ tabId: number }>('openTab', { url, active })
+    this.ownedTabIds.add(opened.tabId)
+    this.startHeapReporting()
     if (!isAboutBlank(url)) {
       this.expectedTabUrls.set(opened.tabId, url)
     }
@@ -322,6 +376,21 @@ export class BridgeV2Runtime {
       this.activeTabId = opened.tabId
     }
     return opened
+  }
+
+  async closeTab(tabId: number): Promise<void> {
+    // Never resolve recovery aliases here: they can point at a user's own tab.
+    if (!this.ownedTabIds.has(tabId)) return
+    await this.reportHeapUsage(tabId, 'before-close')
+    await this.sendRequest('closeTab', { tabId })
+    this.ownedTabIds.delete(tabId)
+    this.imageBlockedTabIds.delete(tabId)
+    this.expectedTabUrls.delete(tabId)
+    for (const [from, to] of this.tabIdAliases) {
+      if (from === tabId || to === tabId) this.tabIdAliases.delete(from)
+    }
+    if (this.activeTabId === tabId) this.activeTabId = null
+    if (this.ownedTabIds.size === 0) this.stopHeapReporting()
   }
 
   async ensureActiveTab(preferredUrl?: string): Promise<number> {
@@ -340,14 +409,7 @@ export class BridgeV2Runtime {
       await this.sendRequest('activateTab', { tabId: picked.tabId })
       return picked.tabId
     }
-    const opened = await this.sendRequest<{ tabId: number }>('openTab', {
-      url: preferredUrl || 'about:blank',
-      active: true
-    })
-    this.activeTabId = opened.tabId
-    if (preferredUrl && !isAboutBlank(preferredUrl)) {
-      this.expectedTabUrls.set(opened.tabId, preferredUrl)
-    }
+    const opened = await this.openTab(preferredUrl || 'about:blank', true)
     return opened.tabId
   }
 
@@ -365,6 +427,33 @@ export class BridgeV2Runtime {
       tabId: targetTabId,
       url
     })
+  }
+
+  async setImageRequestsBlocked(blocked: boolean, tabId?: number): Promise<void> {
+    if (blocked && this.disposed) {
+      throw new Error('Bridge runtime is disposed')
+    }
+    const requestedTabId = tabId ?? this.getTabIdOrThrow()
+    const targetTabId = !blocked && this.imageBlockedTabIds.has(requestedTabId)
+      ? requestedTabId
+      : this.resolveTabId(requestedTabId)
+    // Track before sending so disposal can clean up even if the response is lost.
+    if (blocked) this.imageBlockedTabIds.add(targetTabId)
+    const operation = (async () => {
+      if (!blocked) await this.reportHeapUsage(targetTabId, 'before-unblock')
+      await this.sendRequest('setImageRequestsBlocked', {
+        tabId: targetTabId,
+        blocked
+      })
+      if (!blocked) this.imageBlockedTabIds.delete(targetTabId)
+    })()
+    this.imageBlockingOperations.add(operation)
+    try {
+      await operation
+    } finally {
+      this.imageBlockingOperations.delete(operation)
+    }
+    if (blocked) await this.reportHeapUsage(targetTabId, 'images-blocked')
   }
 
   expectUrl(url: string, tabId?: number): void {
@@ -567,22 +656,122 @@ export class BridgeV2Runtime {
     await this.sendRequest('sleep', { durationMs })
   }
 
-  async fetchAsBase64(
+  async fetchAsBuffer(
     url: string,
     tabId?: number,
     onProgress?: (progress: BridgeDownloadProgress) => void
-  ): Promise<string> {
+  ): Promise<Buffer> {
     void tabId
-    const result = await this.sendRequest<{ base64: string }>(
-      'fetchBinary',
-      { url },
-      IMAGE_FETCH_TIMEOUT_MS,
-      onProgress
-    )
-    return result.base64
+    if (this.disposed) {
+      throw new Error('Bridge runtime is disposed')
+    }
+    const transfer = this.receiveBinary(url, onProgress)
+    this.binaryTransfers.add(transfer)
+    try {
+      return await transfer
+    } finally {
+      this.binaryTransfers.delete(transfer)
+    }
+  }
+
+  private async receiveBinary(
+    url: string,
+    onProgress?: (progress: BridgeDownloadProgress) => void
+  ): Promise<Buffer> {
+    const requestId = createRequestId('req_fetchBinary')
+    const request = {
+      version: '1.0',
+      requestId,
+      action: 'fetchBinary',
+      payload: { url },
+      timeoutMs: IMAGE_FETCH_TIMEOUT_MS,
+      sentAt: new Date().toISOString()
+    }
+    this.appendTrace({ phase: 'request', request })
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS)
+    let downloadedBytes = 0
+    try {
+      const response = await fetch(`${BRIDGE_BASE_URL}/v2/binary/message`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: controller.signal
+      })
+      if (!response.ok) {
+        const body = (await response.json()) as BridgeResponse
+        throw new BridgeActionError({
+          action: 'fetchBinary',
+          requestId,
+          code: body.error?.code ?? 'HTTP_ERROR',
+          message: body.error?.message ?? `HTTP ${response.status}`,
+          details: body.error?.details
+        })
+      }
+      if (!response.body || response.headers.get('content-type') !== 'application/octet-stream') {
+        throw new Error('Bridge returned an invalid binary response')
+      }
+      const length = Number(response.headers.get('content-length'))
+      const totalBytes = response.headers.has('content-length') &&
+        Number.isSafeInteger(length) && length >= 0 ? length : undefined
+      const buffer = totalBytes === undefined ? null : Buffer.allocUnsafe(totalBytes)
+      const chunks: Uint8Array[] = []
+      const reader = response.body.getReader()
+      onProgress?.({ downloadedBytes, totalBytes })
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (buffer) {
+          if (downloadedBytes + value.byteLength > buffer.length) {
+            throw new Error('Binary response exceeds its declared length')
+          }
+          buffer.set(value, downloadedBytes)
+        } else {
+          chunks.push(value)
+        }
+        downloadedBytes += value.byteLength
+        onProgress?.({ downloadedBytes, totalBytes })
+      }
+      if (totalBytes !== undefined && downloadedBytes !== totalBytes) {
+        throw new Error('Binary response ended before its declared length')
+      }
+      this.appendTrace({ phase: 'response', action: 'fetchBinary', requestId, downloadedBytes })
+      return buffer ?? Buffer.concat(chunks, downloadedBytes)
+    } catch (error) {
+      if (error instanceof BridgeActionError) throw error
+      throw new BridgeActionError({
+        action: 'fetchBinary',
+        requestId,
+        code: controller.signal.aborted ? 'LOCAL_TIMEOUT' : 'BINARY_TRANSFER_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+        details: { url, downloadedBytes }
+      })
+    } finally {
+      clearTimeout(timeout)
+      controller.abort()
+    }
   }
 
   async dispose(): Promise<void> {
-    return
+    this.disposed = true
+    this.stopHeapReporting()
+    await Promise.allSettled(this.binaryTransfers)
+    await Promise.allSettled(this.imageBlockingOperations)
+    await Promise.allSettled(this.heapReports.values())
+    const closed = await Promise.allSettled(
+      Array.from(this.ownedTabIds, (tabId) => this.closeTab(tabId))
+    )
+    const restored = await Promise.allSettled(
+      Array.from(this.imageBlockedTabIds, (tabId) =>
+        this.setImageRequestsBlocked(false, tabId)
+      )
+    )
+    const errors = [...closed, ...restored]
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason)
+    if (errors.length) throw new AggregateError(errors, 'Cannot dispose bridge tabs')
+    this.expectedTabUrls.clear()
+    this.tabIdAliases.clear()
+    this.activeTabId = null
   }
 }

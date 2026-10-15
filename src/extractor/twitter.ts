@@ -34,6 +34,7 @@ type TwitterPhoto = {
   statusId: string
   photoNumber: string
   mediaId: string
+  isPinned: boolean
 }
 
 type TwitterPost = {
@@ -44,6 +45,7 @@ type TwitterPost = {
 type TwitterPhotoCandidate = {
   href: string
   imageUrls: Array<string | undefined>
+  isPinned: boolean
 }
 
 export function pickTwitterMediaUrl(
@@ -64,6 +66,7 @@ export class TwitterExtractor {
   readonly context: ScraperContext
   readonly outDir: string
   readonly updateMode: boolean
+  readonly resize: ExtractorCliOptions['resize']
   readonly checker: (id: string) => string | null
   pageUrl = ''
   lockedCount = 0
@@ -79,13 +82,11 @@ export class TwitterExtractor {
     this.context = context
     this.outDir = options.outDir
     this.updateMode = options.updateMode
+    this.resize = options.resize
     this.checker = getFileChecker(this.outDir)
   }
 
-  async doLogin(
-    _cookies: readonly unknown[],
-    options: { targetUrl?: string } = {}
-  ): Promise<void> {
+  async doLogin(options: { targetUrl?: string } = {}): Promise<void> {
     const targetUrl = options.targetUrl
     if (!targetUrl) {
       throw new Error('Twitter media URL is required')
@@ -133,7 +134,7 @@ export class TwitterExtractor {
         seenPhotos.add(photo.href)
         newPhotos += 1
         if (fs.existsSync(resolveOutputFilePath(outputPath, `${photo.statusId}.md`))) {
-          if (this.updateMode) {
+          if (this.updateMode && !photo.isPinned) {
             console.log('Reached processed post, exiting update mode.')
             return outputPath
           }
@@ -190,6 +191,13 @@ export class TwitterExtractor {
                 style?: { backgroundImage?: string }
               }
             | null
+          closest(selector: string):
+            | {
+                querySelector(
+                  socialContextSelector: string
+                ): { textContent?: string | null } | null
+              }
+            | null
         }>).map((anchor) => {
           const image = anchor.querySelector('img')
           const backgroundImage = anchor.querySelector(
@@ -200,7 +208,12 @@ export class TwitterExtractor {
           )?.[1]
           return {
             href: anchor.href,
-            imageUrls: [image?.currentSrc, image?.src, backgroundImageUrl]
+            imageUrls: [image?.currentSrc, image?.src, backgroundImageUrl],
+            isPinned:
+              anchor
+                .closest('article')
+                ?.querySelector('[data-testid="socialContext"]')
+                ?.textContent?.trim() === 'Pinned'
           }
         })
       )
@@ -219,7 +232,8 @@ export class TwitterExtractor {
         imageUrl,
         statusId: match[1],
         photoNumber: match[2],
-        mediaId
+        mediaId,
+        isPinned: candidate.isPinned
       })
       return photos
     }, [])
@@ -262,7 +276,7 @@ ${content}`
     )
     fs.utimesSync(markdownPath, timestamp, timestamp)
     await this.page.locator(CLOSE_DETAIL_SELECTOR).first().click({ force: true })
-    this.page.expectUrl?.(this.sourceUrl)
+    this.page.expectUrl(this.sourceUrl)
     await this.page.waitForSelector(PHOTO_LINK_SELECTOR, { state: 'attached' })
     this.pageUrl = this.sourceUrl
   }
@@ -358,16 +372,15 @@ ${content}`
         const buffer = await linkToBuffer(
           this.page,
           imageUrl,
-          5,
           createDownloadProgressReporter(spinner, 'Saving image')
         )
         const saved = await downloadFile(
-          imageUrl,
           outputPath,
           `${imageId}-${index + 1}`,
           timestamp,
           [this.handle],
-          buffer
+          buffer,
+          this.resize
         )
         names.push(saved)
         spinner.succeed(`Saved ${imageUrl} to ${saved}`)

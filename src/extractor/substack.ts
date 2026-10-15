@@ -94,7 +94,8 @@ export class SubstackExtractor extends Extractor {
       postName: name,
       outDir,
       timestamp,
-      tags
+      tags,
+      resize: this.resize
     })
     const imagesToClick = page.locator(this.selectors.imagesClickable)
     const imageCount = await imagesToClick.count()
@@ -135,16 +136,15 @@ export class SubstackExtractor extends Extractor {
         const img = await linkToBuffer(
           page,
           url,
-          5,
           createDownloadProgressReporter(spinner, 'Saving image')
         )
         imageIdToName[imageId] = await downloadFile(
-          url,
           outDir,
           `${name}-${imageId}`,
           timestamp,
           tags,
-          img
+          img,
+          this.resize
         ).catch((e) => {
           spinner.fail(`Failed to save ${url}: ${String(e)}`)
           throw e

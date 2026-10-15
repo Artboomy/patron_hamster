@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta property="article:published_time" content="2025-01-02T03:04:05.000Z">
+  <title>Synthetic carousel</title>
+</head>
+<body>
+  <article data-tag="post-card">
+    <h1 data-tag="post-title">Synthetic gallery</h1>
+    <div class="patreon-post-content">
+      <p>Three original images, with a duplicate thumbnail for the first image.</p>
+      <img src="/media/p/post/700001/image-one/thumbnail/1.png" width="32" height="32" alt="thumbnail">
+    </div>
+    <button data-tag="gallery-image" onclick="showSlide(0)">First image</button>
+    <button data-tag="gallery-image" onclick="showSlide(1)">Second image</button>
+    <button data-tag="gallery-image" onclick="showSlide(2)">Third image</button>
+  </article>
+  <section id="carousel"></section>
+  <script>
+    const imageIds = ['image-one', 'image-two', 'image-three'];
+    let slide = -1;
+    async function showSlide(index) {
+      await fetch('/slide?index=' + index, { method: 'POST' });
+      if (index > 0) await new Promise(resolve => setTimeout(resolve, 200));
+      let image = document.querySelector('[data-tag="lightboxImage"]');
+      if (!image || index === 2) {
+        const replacement = document.createElement('img');
+        replacement.dataset.tag = 'lightboxImage';
+        replacement.width = 64;
+        replacement.height = 64;
+        if (image) image.replaceWith(replacement);
+        else document.querySelector('#carousel').append(replacement);
+        image = replacement;
+      }
+      image.src = '/media/p/post/700001/' + imageIds[index] + '/eyJxIjoxMDAsIndlYnAiOjB9/1.png';
+      slide = index;
+      let next = document.querySelector('[data-tag="nextImage"]');
+      if (!next) {
+        next = document.createElement('button');
+        next.dataset.tag = 'nextImage';
+        next.textContent = 'Next';
+        next.onclick = () => showSlide(slide + 1);
+        document.querySelector('#carousel').append(next);
+      }
+      next.disabled = index === imageIds.length - 1;
+    }
+  </script>
+</body>
+</html>

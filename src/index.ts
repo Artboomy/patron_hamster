@@ -1,38 +1,26 @@
-import { chromium } from 'rebrowser-playwright'
-import { Cookie } from 'rebrowser-playwright'
 import * as fs from 'fs'
+import checkbox from '@inquirer/checkbox'
 import minimist from 'minimist'
 import type { ParsedArgs } from 'minimist'
-import { waitForDelay, waitForEnter } from './utils.js'
+import { waitForDelay } from './utils.js'
 import { Extractor } from './extractor.js'
 import path from 'path'
 import { generateGalleryHtml } from './galleryHtml.js'
-import { runCache } from './cache.js'
 import { FanboxExtractor } from './extractor/fanbox.js'
-import { fileName, saveCookies } from './saveCookies.js'
 import { oraPromise } from 'ora'
 import open from 'open'
-const cacheDir = path.resolve('./playwright-cache')
-
-import { clearInterval } from 'node:timers'
 import { pathToFileURL } from 'node:url'
 import { SubstackExtractor } from './extractor/substack.js'
 import { TwitterExtractor } from './extractor/twitter.js'
 import { BridgeV2Runtime } from './bridgeV2.js'
 import { BridgeContextShim } from './bridgePageShim.js'
 import type { ScraperContext, ScraperPage } from './extractor/pageTypes.js'
+import type { ResizeBounds } from './scripts/resizeImage.js'
 import {
   startLocalBridgeServer,
   stopLocalBridgeServer
 } from './local-bridge/server.js'
 import { BridgeActionError } from './bridgeV2.js'
-function readCookies(): Cookie[] {
-  try {
-    return JSON.parse(fs.readFileSync(fileName, 'utf8'))
-  } catch (_e) {
-    return []
-  }
-}
 type LaunchArgs = ParsedArgs & {
   dir?: string
   patreon?: string
@@ -40,13 +28,166 @@ type LaunchArgs = ParsedArgs & {
   recover?: boolean
   trace?: boolean
   update?: boolean
+  poll?: boolean
   url?: string
-  v1?: boolean
   year?: string | number
+  resize?: ResizeBounds
+}
+
+type UpdateSite = 'patreon' | 'pixivFanbox' | 'substack' | 'twitter'
+
+export type UpdateTarget = {
+  name: string
+  outDir: string
+  site: UpdateSite
+  url: string
+}
+
+function updateUrlFromPostUrl(postUrl: string): {
+  site: UpdateSite
+  url: string
+} | null {
+  const parsed = new URL(postUrl)
+  if (parsed.hostname === 'x.com') {
+    const handle = parsed.pathname.split('/').filter(Boolean)[0]
+    return handle
+      ? { site: 'twitter', url: `https://x.com/${handle}/media?filter=photo` }
+      : null
+  }
+  if (parsed.hostname.includes('patreon.com')) {
+    const postsIndex = parsed.pathname.indexOf('/posts/')
+    return postsIndex === -1
+      ? null
+      : {
+          site: 'patreon',
+          url: `${parsed.origin}${parsed.pathname.slice(0, postsIndex)}/posts`
+        }
+  }
+  if (parsed.hostname.endsWith('.fanbox.cc')) {
+    return { site: 'pixivFanbox', url: `${parsed.origin}/posts` }
+  }
+  if (parsed.hostname.endsWith('.substack.com')) {
+    return { site: 'substack', url: `${parsed.origin}/archive` }
+  }
+  return null
+}
+
+function findFirstMarkdownFile(dirPath: string): string | null {
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const entryPath = path.join(dirPath, entry.name)
+    if (entry.isDirectory()) {
+      const nestedFile = findFirstMarkdownFile(entryPath)
+      if (nestedFile) {
+        return nestedFile
+      }
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      return entryPath
+    }
+  }
+  return null
+}
+
+export function discoverUpdateTargets(outputDir = path.resolve('output')): UpdateTarget[] {
+  if (!fs.existsSync(outputDir)) {
+    return []
+  }
+  return fs
+    .readdirSync(outputDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry): UpdateTarget[] => {
+      const outDir = path.join(outputDir, entry.name)
+      const visitedPath = path.join(outDir, 'visited.txt')
+      const postUrl = fs.existsSync(visitedPath)
+        ? fs
+            .readFileSync(visitedPath, 'utf8')
+            .split('\n')
+            .find(Boolean)
+        : (() => {
+            const markdownPath = findFirstMarkdownFile(outDir)
+            return markdownPath
+              ? fs
+                  .readFileSync(markdownPath, 'utf8')
+                  .match(/\]\((https?:\/\/[^)\s]+)\)/)?.[1]
+              : undefined
+          })()
+      if (!postUrl) {
+        return []
+      }
+      try {
+        const target = updateUrlFromPostUrl(postUrl)
+        return target
+          ? [{ name: entry.name, outDir, site: target.site, url: target.url }]
+          : []
+      } catch {
+        return []
+      }
+    })
+    .sort((left, right) => left.name.localeCompare(right.name))
+}
+
+export function resolveUpdateTargetChoices(
+  choices: readonly (UpdateTarget | 'all' | 'exit')[],
+  targets: readonly UpdateTarget[]
+): UpdateTarget[] {
+  if (choices.includes('exit')) {
+    return []
+  }
+  return choices.includes('all')
+    ? [...targets]
+    : choices.filter(
+        (choice): choice is UpdateTarget =>
+          choice !== 'all' && choice !== 'exit'
+      )
+}
+
+async function selectUpdateTargets(
+  targets: UpdateTarget[]
+): Promise<UpdateTarget[]> {
+  if (targets.length === 0) {
+    console.log('No downloaded creators found in output.')
+    return []
+  }
+  const choices = await checkbox<UpdateTarget | 'all' | 'exit'>({
+    message: 'Select creators to update (Space toggles, Enter confirms)',
+    choices: [
+      { name: 'Exit without updating', value: 'exit' as const },
+      { name: 'Update all creators', value: 'all' as const },
+      ...targets.map((target) => ({
+        name: `${target.name} (${target.site})`,
+        value: target
+      }))
+    ],
+    shortcuts: { all: null, invert: null }
+  })
+  return resolveUpdateTargetChoices(choices, targets)
+}
+
+function assertPollSupported(args: Pick<LaunchArgs, 'poll' | 'url'>): void {
+  if (
+    args.poll &&
+    args.url &&
+    resolveSite(String(args.url)) !== 'patreon'
+  ) {
+    throw new Error('The --poll option is only supported for Patreon')
+  }
 }
 
 export function resolveLaunchArgs(rawArgs: ParsedArgs): LaunchArgs {
   const args: LaunchArgs = { ...rawArgs }
+  if (rawArgs.resize === undefined || rawArgs.resize === false) {
+    delete args.resize
+  } else if (rawArgs.resize === true) {
+    args.resize = { width: 4000, height: 4000 }
+  } else {
+    if (typeof rawArgs.resize !== 'string' || !/^\d+:\d+$/.test(rawArgs.resize)) {
+      throw new Error('--resize requires positive integer dimensions w:h, or no value for 4000:4000')
+    }
+    const [width, height] = rawArgs.resize.split(':').map(Number)
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+      throw new Error('--resize requires positive safe integer dimensions w:h')
+    }
+    args.resize = { width, height }
+  }
   if (args.patreon !== undefined) {
     if (args.url) {
       throw new Error('Use either --url or --patreon, not both')
@@ -78,10 +219,14 @@ export function resolveLaunchArgs(rawArgs: ParsedArgs): LaunchArgs {
     args.url = `https://x.com/${handle}/media?filter=photo`
     args.dir ??= path.join('output', handle)
   }
-  if (!args.url) {
+  if (args.update && args.year === undefined) {
+    args.year = new Date().getFullYear()
+  }
+  assertPollSupported(args)
+  if (!args.url && !args.update) {
     throw new Error('No url provided')
   }
-  if (!args.dir) {
+  if (!args.dir && !args.update) {
     throw new Error('No dir provided')
   }
   return args
@@ -90,6 +235,8 @@ export function resolveLaunchArgs(rawArgs: ParsedArgs): LaunchArgs {
 export type ExtractorCliOptions = {
   outDir: string
   updateMode: boolean
+  pollMode?: boolean
+  resize?: ResizeBounds
 }
 
 async function generateDefaultGallery(dirPath: string): Promise<string> {
@@ -118,8 +265,6 @@ function prepareDir(dirName: string, updateMode: boolean) {
   console.log(`Directory ${dirName} already exists`)
 }
 
-let isFinished = false
-let cacheId: NodeJS.Timeout | null = null
 let pageUrl: string = ''
 
 function resolveSite(
@@ -166,6 +311,7 @@ async function runV2(args: LaunchArgs): Promise<void> {
   const site = resolveSite(String(url))
   const traceFilePath = trace ? path.resolve(String(args.dir), 'bridge.trace') : ''
   const bridgeV2 = new BridgeV2Runtime({ traceFilePath })
+  const context = new BridgeContextShim(bridgeV2)
   let extractor:
     | Extractor
     | FanboxExtractor
@@ -190,15 +336,15 @@ async function runV2(args: LaunchArgs): Promise<void> {
     )
     await oraPromise(bridgeV2.ping(), 'Pinging v2 local bridge')
     console.log('| V2 bridge ping succeeded')
-    const context = new BridgeContextShim(bridgeV2)
-    context.setDefaultTimeout(50_000)
     const page = await context.newPage()
     extractor = createExtractor(site, page, context, {
       outDir: String(args.dir),
-      updateMode: Boolean(args.update)
+      updateMode: Boolean(args.update),
+      pollMode: Boolean(args.poll),
+      resize: args.resize
     })
     await oraPromise(
-      extractor.doLogin([], { skipCookies: true, targetUrl: String(url) }),
+      extractor.doLogin({ targetUrl: String(url) }),
       'Waiting for login'
     )
     if (pageUrl) {
@@ -210,7 +356,6 @@ async function runV2(args: LaunchArgs): Promise<void> {
       console.log(`${extractor.lockedCount} locked posts were not downloaded`)
     }
     console.log('💯 Extractor finished.')
-    await context.close()
   } catch (e) {
     const bridgeHealth = await bridgeV2.inspectHealth().catch((healthError) => ({
       baseUrl: process.env.BRIDGE_BASE_URL || 'http://127.0.0.1:17353',
@@ -251,113 +396,39 @@ async function runV2(args: LaunchArgs): Promise<void> {
     }
     throw e
   } finally {
-    await bridgeV2.dispose()
-    await stopLocalBridgeServer()
+    try {
+      try {
+        await context.close()
+      } finally {
+        await bridgeV2.dispose()
+      }
+    } finally {
+      await stopLocalBridgeServer()
+    }
+  }
+}
+
+async function updateDownloadedCreators(args: LaunchArgs): Promise<void> {
+  const targets = await selectUpdateTargets(discoverUpdateTargets())
+  for (const target of targets) {
+    console.log(`Updating ${target.name} (${target.site})`)
+    pageUrl = ''
+    await main({
+      ...args,
+      dir: target.outDir,
+      url: target.url,
+      update: true
+    })
   }
 }
 
 export async function main(args: LaunchArgs) {
-  const { server, username, password, dir, url, year, v1, update } = args
-  if (!v1) {
-    prepareDir(String(dir), Boolean(update))
-    return runV2(args)
+  if (args.update && !args.url) {
+    return updateDownloadedCreators(args)
   }
-  if (!url) {
-    console.error('No url provided')
-    return
-  }
-  if (server && username && password) {
-    console.log(
-      `Provided proxy config: ${server}, user=${username}, password=<MASKED>`
-    )
-  }
-  prepareDir(String(dir), Boolean(update))
-  console.log('Launching Chrome browser')
-  const preparedCookies = readCookies()
-  const extensionPaths: string[] = []
-  const adblockExtensionPath = path.resolve('./extensions/adblock')
-  const hasAdblockExtension =
-    fs.existsSync(adblockExtensionPath) &&
-    fs.readdirSync(adblockExtensionPath).length > 0
-  if (hasAdblockExtension) {
-    extensionPaths.push(adblockExtensionPath)
-  }
-  const cfg: Parameters<(typeof chromium)['launchPersistentContext']>[1] = {
-    headless: false,
-    // @see https://github.com/ultrafunkamsterdam/undetected-chromedriver/issues/1388#issuecomment-1631477896
-    // required to pass cloudflare checks for some reason
-    args: [
-      '--auto-open-devtools-for-tabs',
-      '--disable-features=ServiceWorker',
-      '--enable-features=WebRTC-H264WithOpenH264FFmpeg',
-      '--disable-blink-features=AutomationControlled'
-    ],
-    serviceWorkers: 'block',
-    viewport: null,
-    channel: 'chrome'
-  }
-  if (extensionPaths.length > 0) {
-    const csv = extensionPaths.join(',')
-    cfg.args = [
-      ...(cfg.args || []),
-      `--disable-extensions-except=${csv}`,
-      `--load-extension=${csv}`
-    ]
-  }
-  if (server && username) {
-    cfg.proxy = {
-      server,
-      username,
-      password
-    }
-  }
-  const context = await chromium.launchPersistentContext(cacheDir, cfg)
-  const site = resolveSite(String(url))
-  if (site === 'twitter') {
-    throw new Error('Twitter extraction requires the v2 bridge; omit --v1')
-  }
-  cacheId = await runCache(context, site)
-  context.setDefaultTimeout(50_000)
-
-  const page = await context.newPage()
-  const extractor = createExtractor(
-    site,
-    page as unknown as ScraperPage,
-    context as unknown as ScraperContext,
-    {
-      outDir: String(dir),
-      updateMode: Boolean(update)
-    }
-  )
-  await oraPromise(extractor.doLogin(preparedCookies), 'Loading cookies')
-
-  await saveCookies(context as unknown as ScraperContext)
-
-  try {
-    if (pageUrl) {
-      console.log(`⏯  Continuing from ${pageUrl}`)
-    }
-    const finalDir = await extractor.extract(pageUrl || url, String(year))
-    await oraPromise(generateDefaultGallery(finalDir), 'Generating Twitter-style gallery...')
-  } catch (e) {
-    pageUrl = extractor.pageUrl
-    if (extractor.lockedCount) {
-      console.log(`There were ${extractor.lockedCount} locked posts up to now`)
-    }
-    await context.close()
-    throw e
-  }
-  if (extractor.lockedCount) {
-    console.log(`${extractor.lockedCount} locked posts were not downloaded`)
-  }
-  console.log('💯 Extractor finished. Press Enter to close the browser.')
-  await saveCookies(context as unknown as ScraperContext)
-  isFinished = true
-  waitForEnter().then(() => {
-    context.close().finally(() => {
-      process.exit()
-    })
-  })
+  assertPollSupported(args)
+  prepareDir(String(args.dir), Boolean(args.update))
+  return runV2(args)
 }
 let repeats = 50
 
@@ -372,10 +443,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         await main(args)
         break
       } catch (e) {
-        clearInterval(cacheId ?? undefined)
-        if (isFinished) {
-          process.exit()
-        }
         // @ts-ignore nonrecovery errors
         if (e.recoverable === false) {
           console.log('Nonrecoverable error', e)

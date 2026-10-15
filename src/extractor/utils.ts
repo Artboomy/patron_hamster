@@ -6,7 +6,9 @@ import { exiftool } from 'exiftool-vendored'
 import type { Ora } from 'ora'
 import type { DownloadProgress, ScraperPage } from './pageTypes.js'
 import { imageExtensions } from '../constants.js'
-import { normalizeFileName, waitForDelay } from '../utils.js'
+import { normalizeFileName } from '../utils.js'
+import type { ResizeBounds } from '../scripts/resizeImage.js'
+import { resizePngInPlace } from '../scripts/resizeImage.js'
 
 const BRIDGE_PORT = Number(process.env.BRIDGE_PORT || 17353)
 const BRIDGE_HOST = process.env.BRIDGE_HOST || '127.0.0.1'
@@ -56,32 +58,27 @@ export function resolveOutputFilePath(
 }
 
 export async function downloadFile(
-  url: string,
   outputPath: string,
   name: string,
   timestamp: Date | null,
   tags: string[],
-  buffer?: Buffer<ArrayBufferLike>
+  buffer: Buffer<ArrayBufferLike>,
+  resize?: ResizeBounds
 ) {
-  // console.log(`↓ Downloading file ${url}`)
-  let resultBuffer = buffer
-  if (!resultBuffer) {
-    const response = await fetch(url, {})
-    resultBuffer = Buffer.from(await response.arrayBuffer())
-  }
-  const { ext, mime } = await fileTypeFromBuffer(resultBuffer).then(
+  const { ext, mime } = await fileTypeFromBuffer(buffer).then(
     (i) => i || { ext: 'file', mime: 'unknown' }
   )
   const fileName = hasExtension(name) ? name : `${name}.${ext}`
   const safeFileName = normalizeFileName(fileName)
   const filePath = resolveOutputFilePath(outputPath, safeFileName)
   await saveBufferToDisk({
-    buffer: resultBuffer,
+    buffer,
     filePath,
     timestamp,
     tags,
     isImage: mime.includes('image'),
-    mimeType: mime
+    mimeType: mime,
+    resize
   })
   console.log(`♥ Saved file ${fileName} to ${filePath}`)
   return safeFileName
@@ -90,42 +87,9 @@ export async function downloadFile(
 export async function linkToBuffer(
   page: ScraperPage,
   fileUrl: string,
-  maxRetries = 5,
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<Buffer> {
-  if (typeof page.fetchAsBuffer === 'function') {
-    return onProgress
-      ? page.fetchAsBuffer(fileUrl, onProgress)
-      : page.fetchAsBuffer(fileUrl)
-  }
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const array = await page.evaluate(async (url) => {
-        // @ts-ignore page context
-        const response = await fetch(url, { credentials: 'include' })
-        if (!response.ok) {
-          throw new Error(
-            `🚨 Failed to fetch file: ${response.status} ${response.statusText}`
-          )
-        }
-        const blob = await response.blob()
-        return Array.from(new Uint8Array(await blob.arrayBuffer()))
-      }, fileUrl)
-
-      return Buffer.from(array)
-    } catch (err) {
-      if (attempt < maxRetries) {
-        const delay = 500 + Math.floor(Math.random() * 200)
-        console.warn(`⚠️ Attempt ${attempt} failed. Retrying in ${delay}ms...`)
-        await waitForDelay(delay)
-      } else {
-        console.error(`❌ All ${maxRetries} attempts failed for ${fileUrl}`)
-        throw err
-      }
-    }
-  }
-
-  throw new Error('Unexpected retry exit')
+  return page.fetchAsBuffer(fileUrl, onProgress)
 }
 
 export async function saveBufferToDisk({
@@ -134,7 +98,8 @@ export async function saveBufferToDisk({
   timestamp,
   tags,
   isImage,
-  mimeType
+  mimeType,
+  resize
 }: {
   buffer: Buffer
   timestamp: Date | null
@@ -142,10 +107,17 @@ export async function saveBufferToDisk({
   tags: string[]
   isImage: boolean
   mimeType?: string
+  resize?: ResizeBounds
 }) {
   fs.writeFileSync(filePath, buffer)
+  let savedBuffer = buffer
+  if (resize && isImage && mimeType === 'image/png') {
+    const result = await resizePngInPlace(filePath, resize)
+    savedBuffer = fs.readFileSync(filePath)
+    console.log(`Resized PNG ${path.basename(filePath)}: ${result.width}x${result.height}, ${result.inputBytes} -> ${result.outputBytes} bytes`)
+  }
   if (isImage && (mimeType || '').startsWith('image/')) {
-    void publishSavedImage(buffer, mimeType as string, path.basename(filePath))
+    void publishSavedImage(savedBuffer, mimeType as string, path.basename(filePath))
   }
   if (tags.length && isImage) {
     // console.log('✍ Writing tags')
@@ -177,7 +149,7 @@ async function publishSavedImage(
       body: buffer
     })
   } catch {
-    // Local bridge may be unavailable in non-v2 runs; ignore.
+    // Preview publishing is best-effort; the file is already saved.
   }
 }
 

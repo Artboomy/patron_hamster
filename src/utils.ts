@@ -183,7 +183,7 @@ export function patchLinks({
 /**
  * Moves the mouse around randomly within the current viewport.
  *
- * @param page Playwright Page instance.
+ * @param page Bridge-backed scraper page.
  * @param moveCount How many random moves to perform (default 5).
  */
 export async function randomMouseMovements(page: ScraperPage, moveCount = 5) {

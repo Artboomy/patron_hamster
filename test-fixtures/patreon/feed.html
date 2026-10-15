@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic Patreon feed</title></head>
+<body>
+  <h2>Filter Posts</h2>
+  <input type="radio" name="post-filter-date" value="2025">
+  <button role="switch" aria-label="Show only posts I can access" aria-checked="false"
+    onclick="this.setAttribute('aria-checked', 'true')">Accessible</button>
+  <button onclick="document.body.dataset.mediaType = 'image'">Image (2)</button>
+  <button onclick="applyFilters()">Apply filters</button>
+  <div id="posts">
+    <article data-tag="post-card">
+      <h3 data-tag="post-title"><a href="/fixture/posts/seen-710001">Seen post</a></h3>
+      <img src="/feed-initial.png" width="32" height="32" alt="initial preview">
+    </article>
+  </div>
+  <button id="more" onclick="loadMore()">Load more</button>
+  <script>
+    function applyFilters() {
+      document.body.dataset.year = document.querySelector('[name="post-filter-date"]:checked').value;
+      const image = new Image();
+      image.src = '/feed-filtered.png';
+      document.querySelector('#posts').append(image);
+    }
+    async function loadMore() {
+      const loader = document.createElement('div');
+      loader.setAttribute('aria-label', 'loading more posts');
+      document.body.append(loader);
+      await fetch('/feed-next');
+      const card = document.createElement('article');
+      card.dataset.tag = 'post-card';
+      card.innerHTML = '<h3 data-tag="post-title"><a href="/fixture/posts/synthetic-gallery-700001">Next post</a></h3><img src="/feed-next.png" width="32" height="32" alt="next preview">';
+      document.querySelector('#posts').append(card);
+      document.querySelector('#more').remove();
+      loader.remove();
+    }
+  </script>
+</body>
+</html>

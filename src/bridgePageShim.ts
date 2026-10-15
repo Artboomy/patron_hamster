@@ -114,8 +114,8 @@ class BridgeDownloadShim implements ScraperDownload {
   }
 
   async saveAs(filePath: string): Promise<void> {
-    const base64 = await this.runtime.fetchAsBase64(this.href, this.tabId)
-    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
+    const buffer = await this.runtime.fetchAsBuffer(this.href, this.tabId)
+    fs.writeFileSync(filePath, buffer)
   }
 }
 
@@ -338,9 +338,11 @@ export class BridgePageShim implements ScraperPage {
   private readonly responseListeners = new Set<
     (response: ScraperResponse) => void
   >()
+  private readonly pendingResponses = new Set<Promise<void>>()
   private readonly downloadWaiters: Array<(download: ScraperDownload) => void> =
     []
   private pendingDownload: ScraperDownload | null = null
+  private closePromise: Promise<void> | null = null
   mouse: ScraperMouse = new NoopMouse()
 
   constructor(
@@ -396,6 +398,10 @@ export class BridgePageShim implements ScraperPage {
   ): Promise<void> {
     await this.runtime.navigate(url, this.tabId)
     this.currentUrl = url
+  }
+
+  async setImageRequestsBlocked(blocked: boolean): Promise<void> {
+    await this.runtime.setImageRequestsBlocked(blocked, this.tabId)
   }
 
   url(): string {
@@ -459,8 +465,7 @@ export class BridgePageShim implements ScraperPage {
     url: string,
     onProgress?: (progress: DownloadProgress) => void
   ): Promise<Buffer> {
-    const base64 = await this.runtime.fetchAsBase64(url, this.tabId, onProgress)
-    return Buffer.from(base64, 'base64')
+    return this.runtime.fetchAsBuffer(url, this.tabId, onProgress)
   }
 
   emitDownload(href: string): void {
@@ -487,21 +492,40 @@ export class BridgePageShim implements ScraperPage {
     for (const imageUrl of urls) {
       const response: ScraperResponse = {
         url: () => imageUrl,
-        body: async (onProgress) => {
-          const base64 = await this.runtime.fetchAsBase64(imageUrl, this.tabId, onProgress)
-          return Buffer.from(base64, 'base64')
-        }
+        body: (onProgress) => this.runtime.fetchAsBuffer(imageUrl, this.tabId, onProgress)
       }
       for (const listener of this.responseListeners) {
-        listener(response)
+        const pending = Promise.resolve(listener(response))
+        this.pendingResponses.add(pending)
+        void pending.then(
+          () => this.pendingResponses.delete(pending),
+          () => this.pendingResponses.delete(pending)
+        )
       }
     }
+  }
+
+  async drainResponses(): Promise<void> {
+    this.responseListeners.clear()
+    await Promise.allSettled(this.pendingResponses)
+  }
+
+  close(): Promise<void> {
+    if (!this.closePromise) {
+      this.closePromise = (async () => {
+        await this.drainResponses()
+        await this.runtime.closeTab(this.tabId)
+      })().catch((error) => {
+        this.closePromise = null
+        throw error
+      })
+    }
+    return this.closePromise
   }
 }
 
 export class BridgeContextShim implements ScraperContext {
   private readonly runtime: BridgeV2Runtime
-  private defaultTimeoutMs = 30_000
   private readonly pages: BridgePageShim[] = []
 
   constructor(runtime: BridgeV2Runtime) {
@@ -515,20 +539,20 @@ export class BridgeContextShim implements ScraperContext {
     return page
   }
 
-  setDefaultTimeout(timeoutMs: number): void {
-    this.defaultTimeoutMs = timeoutMs
-  }
-
-  async addCookies(_cookies: readonly unknown[]): Promise<void> {
-    return
-  }
-
-  async cookies(): Promise<unknown[]> {
-    return []
-  }
-
   async close(): Promise<void> {
-    this.pages.length = 0
-    void this.defaultTimeoutMs
+    const pages = [...this.pages]
+    const results = await Promise.allSettled(pages.map((page) => page.close()))
+    const errors: unknown[] = []
+    for (const [index, result] of results.entries()) {
+      if (result.status === 'fulfilled') {
+        const pageIndex = this.pages.indexOf(pages[index])
+        if (pageIndex !== -1) this.pages.splice(pageIndex, 1)
+      } else {
+        errors.push(result.reason)
+      }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, 'Failed to close scraper pages')
+    }
   }
 }

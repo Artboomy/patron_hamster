@@ -47,6 +47,7 @@ describe('generateGalleryHtml', () => {
             observe() {}
           }
           window.HTMLElement.prototype.scrollIntoView = () => {}
+          window.Range.prototype.getClientRects = () => []
           window.requestAnimationFrame = (callback) => {
             callback(Date.now())
             return 0

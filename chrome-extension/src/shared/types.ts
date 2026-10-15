@@ -17,7 +17,7 @@ export interface BridgeRequest<TPayload = unknown> {
   action: string;
   payload: TPayload;
   timeoutMs: number;
-  sentAt: number;
+  sentAt: number | string;
 }
 
 export interface BridgeResponse<TResult = unknown> {

@@ -80,6 +80,8 @@
         "enum": [
           "ping",
           "openTab",
+          "closeTab",
+          "getHeapUsage",
           "navigate",
           "getUrl",
           "evaluate",
@@ -229,6 +231,12 @@
               },
               {
                 "$ref": "#/components/schemas/OpenTabResult"
+              },
+              {
+                "$ref": "#/components/schemas/CloseTabResult"
+              },
+              {
+                "$ref": "#/components/schemas/HeapUsageResult"
               },
               {
                 "$ref": "#/components/schemas/NavigateResult"
@@ -383,6 +391,53 @@
           "url",
           "active"
         ],
+        "additionalProperties": false
+      },
+      "CloseTabResult": {
+        "type": "object",
+        "description": "The requested tab was closed or was already absent.",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "closed": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": ["tabId", "closed"],
+        "additionalProperties": false
+      },
+      "HeapUsageResult": {
+        "type": "object",
+        "description": "V8 isolate heap usage in bytes, measured without forcing garbage collection. Not total tab/process memory.",
+        "properties": {
+          "tabId": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string"
+          },
+          "usedSize": {
+            "type": "number",
+            "minimum": 0
+          },
+          "totalSize": {
+            "type": "number",
+            "minimum": 0
+          },
+          "embedderHeapUsedSize": {
+            "type": "number",
+            "minimum": 0
+          },
+          "backingStorageSize": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": ["tabId", "url", "usedSize", "totalSize"],
         "additionalProperties": false
       },
       "NavigatePayload": {
@@ -935,6 +990,14 @@
       "openTab": {
         "payloadSchema": "#/components/schemas/OpenTabPayload",
         "resultSchema": "#/components/schemas/OpenTabResult"
+      },
+      "closeTab": {
+        "payloadSchema": "#/components/schemas/GetUrlPayload",
+        "resultSchema": "#/components/schemas/CloseTabResult"
+      },
+      "getHeapUsage": {
+        "payloadSchema": "#/components/schemas/GetUrlPayload",
+        "resultSchema": "#/components/schemas/HeapUsageResult"
       },
       "navigate": {
         "payloadSchema": "#/components/schemas/NavigatePayload",

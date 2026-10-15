@@ -99,16 +99,15 @@ export class FanboxExtractor extends Extractor {
         const img = await linkToBuffer(
           page,
           url,
-          5,
           createDownloadProgressReporter(spinner, 'Saving image')
         )
         imageIdToName[imageId] = await downloadFile(
-          url,
           outDir,
           `${name}-${imageId}`,
           timestamp,
           tags,
-          img
+          img,
+          this.resize
         ).catch((e) => {
           spinner.fail(`Failed to save ${url}: ${String(e)}`)
           throw e

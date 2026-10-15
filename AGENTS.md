@@ -9,3 +9,5 @@ This workspace may not have `node` on PATH by default. Run Node/Yarn commands th
 - `fnm exec --using <version> -- node --version`
 
 After successful self-check always run build:extension
+
+Do not use real-life URLs in tests. Use synthetic fixtures instead of real creators, posts, or user-provided URLs.

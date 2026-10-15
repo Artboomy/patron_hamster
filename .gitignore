@@ -11,5 +11,7 @@ custom-cache
 flags.json
 mcp.json
 .plans
+.reports
 .cache
 test-results
+.DS_Store

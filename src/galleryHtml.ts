@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import * as cheerio from 'cheerio'
 import { marked } from 'marked'
 
 const require = createRequire(import.meta.url)
@@ -90,6 +91,10 @@ const feedStyles = `
   .post-content h1 + p { margin: 0 0 12px; color: #71767b; font-size: 15px; }
   .post-content p { margin: 0 0 12px; }
   .post-content h2 { margin: 16px 0 8px; font-size: 15px; }
+  .post-text { min-width: 0; margin: 0; padding: 0; border: 0; }
+  .post-text legend { padding: 0; margin-bottom: 12px; }
+  .post-text-toggle { border: 1px solid #2f3336; border-radius: 8px; padding: 6px 12px; background: transparent; color: #1d9bf0; cursor: pointer; font: inherit; }
+  .post-text-toggle:focus-visible { outline: 2px solid #1d9bf0; outline-offset: 2px; }
   .post-content img { display: inline-block; max-width: 100%; max-height: 520px; border: 1px solid #2f3336; border-radius: 16px; cursor: zoom-in; object-fit: contain; vertical-align: top; }
   .post-content h2 + p:has(img) { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; overscroll-behavior-inline: contain; padding-bottom: 4px; }
   .post-content h2 + p:has(img) img { flex: 0 0 min(70%, 640px); width: min(70%, 640px); max-height: 480px; }
@@ -145,7 +150,9 @@ export function generateGalleryHtml(markdownDir: string): string {
       const monthTarget =
         date && !renderedMonths.has(date.id) ? ` id="${getMonthTargetId(date.id)}"` : ''
       if (date) renderedMonths.add(date.id)
-      return `<article class="post"${monthTarget}${date ? ` data-date="${date.isoDate}"` : ''}><div class="avatar" aria-hidden="true">PH</div><div class="post-content">${marked.parse(markdown)}</div></article>`
+      const $ = cheerio.load(marked.parse(markdown, { async: false }), null, false)
+      $('img').attr('loading', 'lazy')
+      return `<article class="post"${monthTarget}${date ? ` data-date="${date.isoDate}"` : ''}><div class="avatar" aria-hidden="true">PH</div><div class="post-content">${$.html()}</div></article>`
     })
     .join('\n')
   const scrubber =
@@ -214,6 +221,75 @@ export function generateGalleryHtml(markdownDir: string): string {
     const zoomInButton = document.querySelector('.carousel-zoom-in')
     const scrubber = document.querySelector('[photo-scrubber]')
     const scrubberButtons = [...document.querySelectorAll('.scrubber-month')]
+    // Count rendered text rows, not characters or paragraph margins.
+    const exceedsFiveRows = (body) => {
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT)
+      const range = document.createRange()
+      const rows = []
+      const rotated = feedViewport.classList.contains('is-rotated')
+      while (walker.nextNode()) {
+        if (!walker.currentNode.textContent.trim()) continue
+        range.selectNodeContents(walker.currentNode)
+        for (const rect of range.getClientRects()) {
+          if (!rect.width || !rect.height) continue
+          const top = rotated ? rect.left : rect.top
+          const bottom = rotated ? rect.right : rect.bottom
+          if (!rows.some((row) => top < row.bottom && bottom > row.top)) {
+            rows.push({ top, bottom })
+            if (rows.length > 5) return true
+          }
+        }
+      }
+      return false
+    }
+    const postTexts = []
+    document.querySelectorAll('.post-content').forEach((post, index) => {
+      const children = [...post.children]
+      const date = children.find((child) => child.matches('p') && /^Date:/.test(child.textContent))
+      const header = date || children.find((child) => child.matches('h1'))
+      const nodes = []
+      for (let node = header ? header.nextElementSibling : post.firstElementChild; node; node = node.nextElementSibling) {
+        if (node.matches('h2') && /^(Gallery|Attachments|Tags)$/.test(node.textContent.trim())) break
+        if (node.matches('img, video, audio') || node.querySelector('img, video, audio')) break
+        nodes.push(node)
+      }
+      if (!nodes.length) return
+      const fieldset = document.createElement('fieldset')
+      fieldset.className = 'post-text'
+      const legend = document.createElement('legend')
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'post-text-toggle'
+      button.setAttribute('aria-expanded', 'false')
+      const body = document.createElement('div')
+      body.id = 'post-text-' + index
+      button.setAttribute('aria-controls', body.id)
+      legend.append(button)
+      nodes[0].before(fieldset)
+      body.append(...nodes)
+      fieldset.append(legend, body)
+      const render = (long) => {
+        legend.hidden = !long
+        body.hidden = long && button.getAttribute('aria-expanded') !== 'true'
+        button.textContent = body.hidden ? 'Show post text' : 'Hide post text'
+      }
+      button.addEventListener('click', () => {
+        button.setAttribute('aria-expanded', String(body.hidden))
+        render(true)
+      })
+      postTexts.push(() => {
+        body.hidden = false
+        render(exceedsFiveRows(body))
+      })
+    })
+    const updatePostTexts = () => postTexts.forEach((update) => update())
+    updatePostTexts()
+    let textResizeFrame
+    window.addEventListener('resize', () => {
+      cancelAnimationFrame(textResizeFrame)
+      textResizeFrame = requestAnimationFrame(updatePostTexts)
+    })
+    document.fonts?.ready.then(updatePostTexts)
     const galleryBookmarkParam = 'image'
     const persistViewedImage = () => {
       const imageSource = images[imageIndex]?.getAttribute('src')
@@ -343,6 +419,7 @@ export function generateGalleryHtml(markdownDir: string): string {
     rotateFeedButton.addEventListener('click', () => {
       const rotated = feedViewport.classList.toggle('is-rotated')
       rotateFeedButton.setAttribute('aria-pressed', String(rotated))
+      updatePostTexts()
     })
 
     document.addEventListener('click', (event) => {

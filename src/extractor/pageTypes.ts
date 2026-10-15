@@ -50,6 +50,7 @@ export interface ScraperLocator {
 }
 
 export interface ScraperPage {
+  close(): Promise<void>
   locator(
     selector: string,
     options?: {
@@ -81,15 +82,13 @@ export interface ScraperPage {
   off(event: 'response', listener: (response: ScraperResponse) => void): void
   waitForEvent(event: 'download'): Promise<ScraperDownload>
   waitForTimeout(timeoutMs: number): Promise<void>
-  fetchAsBuffer?(url: string, onProgress?: (progress: DownloadProgress) => void): Promise<Buffer>
+  fetchAsBuffer(url: string, onProgress?: (progress: DownloadProgress) => void): Promise<Buffer>
+  setImageRequestsBlocked(blocked: boolean): Promise<void>
   mouse: ScraperMouse
-  expectUrl?(url: string): void
+  expectUrl(url: string): void
 }
 
 export interface ScraperContext {
   newPage(): Promise<ScraperPage>
-  setDefaultTimeout(timeoutMs: number): void
-  addCookies(cookies: readonly unknown[]): Promise<void>
-  cookies(): Promise<unknown[]>
   close(): Promise<void>
 }
